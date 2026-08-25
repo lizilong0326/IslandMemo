@@ -11,15 +11,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hoverTimer: Timer?
     private var globalHotKey: GlobalHotKey?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
     private var isAnimatingIn = false
     private var isAnimatingOut = false
     private var isPinnedByHotKey = false
+    private var hasPointerEnteredAfterHotKey = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupPanel()
         setupMenuBar()
         setupGlobalHotKey()
+        setupDismissMonitors()
         store.load()
         startHoverTracking()
     }
@@ -68,6 +72,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func setupDismissMonitors() {
+        let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) { [weak self] _ in
+            Task { @MainActor in self?.dismissHotKeyPanelIfClickedOutside() }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) { [weak self] event in
+            Task { @MainActor in self?.dismissHotKeyPanelIfClickedOutside() }
+            return event
+        }
+    }
+
     private func startHoverTracking() {
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkPointer() }
@@ -75,7 +90,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func checkPointer() {
-        if isPinnedByHotKey { return }
         guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
         let pointer = NSEvent.mouseLocation
         let centerX = screen.frame.midX
@@ -84,8 +98,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let trigger = NSRect(x: centerX - 140, y: screen.frame.maxY - 86, width: 280, height: 86)
         // Date editing is presented in a separate popover window. Treat that popover
         // as part of the drawer so it remains usable while the main panel is open.
-        let insidePanelOrPopover = NSApp.windows.contains {
-            $0.isVisible && $0.frame.contains(pointer)
+        let insidePanelOrPopover = isInsideDrawerOrPopover(pointer)
+
+        if isPinnedByHotKey {
+            if insidePanelOrPopover {
+                hasPointerEnteredAfterHotKey = true
+            } else if hasPointerEnteredAfterHotKey && panel.isVisible && !isAnimatingIn && !isAnimatingOut {
+                isPinnedByHotKey = false
+                hasPointerEnteredAfterHotKey = false
+                hidePanel(on: screen)
+            }
+            return
         }
 
         if trigger.contains(pointer) || insidePanelOrPopover {
@@ -146,10 +169,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSScreen.screens.first { $0.frame.contains(point) }
     }
 
+    private func isInsideDrawerOrPopover(_ point: NSPoint) -> Bool {
+        NSApp.windows.contains { $0.isVisible && $0.frame.contains(point) }
+    }
+
+    private func dismissHotKeyPanelIfClickedOutside() {
+        guard isPinnedByHotKey, panel.isVisible else { return }
+        let pointer = NSEvent.mouseLocation
+        guard !isInsideDrawerOrPopover(pointer),
+              let screen = screenContainingMouse() ?? NSScreen.main else {
+            hasPointerEnteredAfterHotKey = true
+            return
+        }
+
+        isPinnedByHotKey = false
+        hasPointerEnteredAfterHotKey = false
+        hidePanel(on: screen)
+    }
+
     @objc private func openFromMenu() {
         guard let screen = NSScreen.main else { return }
         isPinnedByHotKey = true
         showPanel(on: screen)
+        hasPointerEnteredAfterHotKey = isInsideDrawerOrPopover(NSEvent.mouseLocation)
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         store.requestAddFocus()
@@ -159,12 +201,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
         if panel.isVisible && isPinnedByHotKey {
             isPinnedByHotKey = false
+            hasPointerEnteredAfterHotKey = false
             hidePanel(on: screen)
             return
         }
 
         isPinnedByHotKey = true
         showPanel(on: screen)
+        hasPointerEnteredAfterHotKey = isInsideDrawerOrPopover(NSEvent.mouseLocation)
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
