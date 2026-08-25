@@ -92,10 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func checkPointer() {
         guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
         let pointer = NSEvent.mouseLocation
-        let centerX = screen.frame.midX
-        // The pointer can sit slightly below the physical notch because macOS keeps
-        // menu-bar hit testing out of the camera housing. Include that reachable band.
-        let trigger = NSRect(x: centerX - 140, y: screen.frame.maxY - 86, width: 280, height: 86)
+        let trigger = notchTrigger(on: screen)
         // Date editing is presented in a separate popover window. Treat that popover
         // as part of the drawer so it remains usable while the main panel is open.
         let insidePanelOrPopover = isInsideDrawerOrPopover(pointer)
@@ -167,6 +164,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func screenContainingMouse() -> NSScreen? {
         let point = NSEvent.mouseLocation
         return NSScreen.screens.first { $0.frame.contains(point) }
+    }
+
+    private func notchTrigger(on screen: NSScreen) -> NSRect {
+        if let leftArea = screen.auxiliaryTopLeftArea,
+           let rightArea = screen.auxiliaryTopRightArea,
+           !leftArea.isEmpty,
+           !rightArea.isEmpty,
+           rightArea.minX > leftArea.maxX {
+            // The gap between the two unobscured menu-bar areas is the physical notch.
+            // A 3pt horizontal allowance prevents precision issues without occupying
+            // any of the usable content directly below it.
+            let height = min(max(screen.safeAreaInsets.top, 28), 42)
+            return NSRect(
+                x: leftArea.maxX - 3,
+                y: screen.frame.maxY - height,
+                width: rightArea.minX - leftArea.maxX + 6,
+                height: height
+            )
+        }
+
+        // Displays without a notch get a compact top-center trigger only.
+        return NSRect(
+            x: screen.frame.midX - 90,
+            y: screen.frame.maxY - 30,
+            width: 180,
+            height: 30
+        )
     }
 
     private func isInsideDrawerOrPopover(_ point: NSPoint) -> Bool {
