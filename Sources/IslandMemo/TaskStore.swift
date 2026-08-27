@@ -67,6 +67,16 @@ final class TaskStore: ObservableObject {
         persist()
     }
 
+    func permanentlyDelete(_ task: TaskItem) {
+        tasks.removeAll { $0.id == task.id }
+        persist()
+    }
+
+    func emptyTrash() {
+        tasks.removeAll { $0.deletedAt != nil }
+        persist()
+    }
+
     func updateTitle(_ task: TaskItem, title: String) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty,

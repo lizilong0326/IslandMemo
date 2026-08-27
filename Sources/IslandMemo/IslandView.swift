@@ -14,6 +14,7 @@ struct IslandView: View {
     @State private var showsNewTaskDateEditor = false
     @State private var newTaskPriority: TaskPriority = .blue
     @State private var showsPriorityPicker = false
+    @State private var showsEmptyTrashConfirmation = false
     @State private var section: MemoSection = .tasks
     @FocusState private var titleFocused: Bool
 
@@ -136,14 +137,35 @@ struct IslandView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             if section == .trash {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(items) { task in
-                            TaskRow(task: task, isTrash: true, store: store)
+                VStack(spacing: 10) {
+                    HStack {
+                        Text("已删除任务")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.46))
+                        Spacer()
+                        Button("全部删除", role: .destructive) {
+                            showsEmptyTrashConfirmation = true
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                    }
+                    .padding(.horizontal, 4)
+
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            ForEach(items) { task in
+                                TaskRow(task: task, isTrash: true, store: store)
+                            }
                         }
                     }
+                    .scrollIndicators(.never)
                 }
-                .scrollIndicators(.never)
+                .alert("彻底删除全部任务？", isPresented: $showsEmptyTrashConfirmation) {
+                    Button("取消", role: .cancel) {}
+                    Button("全部删除", role: .destructive) { store.emptyTrash() }
+                } message: {
+                    Text("该操作无法撤销。")
+                }
             } else {
                 ScrollView {
                     LazyVStack(spacing: 14) {
@@ -205,14 +227,13 @@ private struct TaskRow: View {
     @State private var editedTitle = ""
     @State private var showsDateEditor = false
     @State private var showsPriorityEditor = false
+    @State private var showsPermanentDeleteConfirmation = false
     @State private var draftDate = Date().addingTimeInterval(3600)
     @FocusState private var editFocused: Bool
 
     var body: some View {
         HStack(spacing: 11) {
-            if isTrash {
-                Image(systemName: "trash").foregroundStyle(.white.opacity(0.35))
-            } else {
+            if !isTrash {
                 Button { store.toggle(task) } label: {
                     Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
                         .font(.title3)
@@ -247,6 +268,13 @@ private struct TaskRow: View {
             if isTrash {
                 Button { store.restore(task) } label: { Image(systemName: "arrow.uturn.backward") }
                     .buttonStyle(.borderless).help("恢复任务")
+                Button(role: .destructive) {
+                    showsPermanentDeleteConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("彻底删除")
             } else if isHovered || showsDateEditor || showsPriorityEditor {
                 Button {
                     showsPriorityEditor.toggle()
@@ -298,6 +326,12 @@ private struct TaskRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) { isHovered = hovering }
+        }
+        .alert("彻底删除这个任务？", isPresented: $showsPermanentDeleteConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("彻底删除", role: .destructive) { store.permanentlyDelete(task) }
+        } message: {
+            Text("该操作无法撤销。")
         }
     }
 
