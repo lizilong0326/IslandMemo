@@ -6,8 +6,21 @@ private enum MemoSection: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+private enum AppTab: String, CaseIterable, Identifiable {
+    case memo = "备忘录"
+    case clipboard = "复制记录"
+    var id: Self { self }
+}
+
+private enum TaskCompletionFilter: String, CaseIterable, Identifiable {
+    case incomplete = "未完成"
+    case completed = "已完成"
+    var id: Self { self }
+}
+
 struct IslandView: View {
     @ObservedObject var store: TaskStore
+    @ObservedObject var clipboardStore: ClipboardStore
     @State private var title = ""
     @State private var hasDueDate = false
     @State private var dueDate = Date().addingTimeInterval(3600)
@@ -16,6 +29,8 @@ struct IslandView: View {
     @State private var showsPriorityPicker = false
     @State private var showsEmptyTrashConfirmation = false
     @State private var section: MemoSection = .tasks
+    @State private var selectedTab: AppTab = .memo
+    @State private var completionFilter: TaskCompletionFilter = .incomplete
     @FocusState private var titleFocused: Bool
 
     var body: some View {
@@ -24,22 +39,42 @@ struct IslandView: View {
                 .fill(Color.black.opacity(0.92))
 
             VStack(spacing: 16) {
-                if section == .tasks { addTaskArea }
-                content
+                if selectedTab == .memo {
+                    if section == .tasks {
+                        completionTabBar
+                        if completionFilter == .incomplete { addTaskArea }
+                    }
+                    content
+                } else {
+                    ClipboardHistoryView(store: clipboardStore)
+                }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 20)
-            .padding(.top, 76)
+            .padding(.bottom, 70)
+            .padding(.top, 74)
+            .frame(maxHeight: .infinity, alignment: .top)
 
             header
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
+
+            VStack {
+                Spacer()
+                bottomTabBar
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            }
         }
         .frame(width: 444, height: 524)
         .preferredColorScheme(.dark)
         .onChange(of: store.focusAddRequest) { _ in
+            selectedTab = .memo
             section = .tasks
+            completionFilter = .incomplete
             DispatchQueue.main.async { titleFocused = true }
+        }
+        .onChange(of: store.resetMemoListRequest) { _ in
+            completionFilter = .incomplete
         }
         .alert("提示", isPresented: Binding(
             get: { store.errorMessage != nil },
@@ -51,21 +86,72 @@ struct IslandView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Text("备忘录").font(.title2.bold())
+            Text(selectedTab.rawValue).font(.title2.bold())
             Spacer()
-            Button { section = .tasks } label: {
-                Image(systemName: "checklist")
-                    .foregroundStyle(section == .tasks ? .blue : .white.opacity(0.55))
+            if selectedTab == .memo {
+                Button { section = .tasks } label: {
+                    Image(systemName: "checklist")
+                        .foregroundStyle(section == .tasks ? .blue : .white.opacity(0.55))
+                }
+                .buttonStyle(.borderless)
+                .help("任务列表")
+                Button { section = .trash } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(section == .trash ? .blue : .white.opacity(0.55))
+                }
+                .buttonStyle(.borderless)
+                .help("回收站")
             }
-            .buttonStyle(.borderless)
-            .help("任务列表")
-            Button { section = .trash } label: {
-                Image(systemName: "trash")
-                    .foregroundStyle(section == .trash ? .blue : .white.opacity(0.55))
-            }
-            .buttonStyle(.borderless)
-            .help("回收站")
         }
+    }
+
+    private var bottomTabBar: some View {
+        HStack(spacing: 6) {
+            tabButton(.memo, systemImage: "checklist")
+            tabButton(.clipboard, systemImage: "doc.on.clipboard")
+        }
+        .padding(5)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private var completionTabBar: some View {
+        HStack(spacing: 28) {
+            ForEach(TaskCompletionFilter.allCases) { filter in
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { completionFilter = filter }
+                } label: {
+                    VStack(spacing: 4) {
+                        Text(filter.rawValue)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(completionFilter == filter ? .white : .white.opacity(0.45))
+                        Capsule()
+                            .fill(completionFilter == filter ? Color.blue : Color.clear)
+                            .frame(width: 34, height: 2)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.leading, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .offset(y: -10)
+    }
+
+    private func tabButton(_ tab: AppTab, systemImage: String) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { selectedTab = tab }
+        } label: {
+            Label(tab.rawValue, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .foregroundStyle(selectedTab == tab ? .white : .white.opacity(0.48))
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(selectedTab == tab ? Color.blue.opacity(0.8) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private var addTaskArea: some View {
@@ -126,12 +212,14 @@ struct IslandView: View {
 
     @ViewBuilder
     private var content: some View {
-        let items = section == .tasks ? store.activeTasks : store.deletedTasks
+        let items = section == .tasks ? visibleTasks : store.deletedTasks
         if items.isEmpty {
             VStack(spacing: 9) {
                 Image(systemName: section == .tasks ? "checklist" : "trash")
                     .font(.system(size: 30)).foregroundStyle(.white.opacity(0.25))
-                Text(section == .tasks ? "还没有任务" : "回收站是空的")
+                Text(section == .tasks
+                     ? (completionFilter == .incomplete ? "还没有未完成任务" : "还没有已完成任务")
+                     : "回收站是空的")
                     .foregroundStyle(.white.opacity(0.45))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -188,7 +276,7 @@ struct IslandView: View {
     }
 
     private var taskGroups: [TaskGroup] {
-        let tasks = store.activeTasks
+        let tasks = visibleTasks
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
@@ -205,6 +293,12 @@ struct IslandView: View {
         return definitions.compactMap { title, matches in
             let matching = tasks.filter(matches)
             return matching.isEmpty ? nil : TaskGroup(title: title, tasks: matching)
+        }
+    }
+
+    private var visibleTasks: [TaskItem] {
+        store.activeTasks.filter { task in
+            completionFilter == .completed ? task.isCompleted : !task.isCompleted
         }
     }
 
@@ -229,10 +323,14 @@ private struct TaskRow: View {
     @State private var showsPriorityEditor = false
     @State private var showsPermanentDeleteConfirmation = false
     @State private var draftDate = Date().addingTimeInterval(3600)
+    @State private var isSubtaskListExpanded = false
+    @State private var newSubtaskTitle = ""
     @FocusState private var editFocused: Bool
+    @FocusState private var subtaskFocused: Bool
 
     var body: some View {
-        HStack(spacing: 11) {
+        VStack(spacing: 0) {
+            HStack(spacing: 11) {
             if !isTrash {
                 Button { store.toggle(task) } label: {
                     Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
@@ -262,6 +360,19 @@ private struct TaskRow: View {
                         .font(.caption2)
                         .foregroundStyle(due < .now && !task.isCompleted ? .red : .white.opacity(0.45))
                 }
+                if !isTrash, let subtasks = task.subtasks, !subtasks.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) { isSubtaskListExpanded.toggle() }
+                    } label: {
+                        Label(
+                            "\(subtasks.filter(\.isCompleted).count)/\(subtasks.count)",
+                            systemImage: "list.bullet"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.45))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             Spacer(minLength: 8)
 
@@ -276,6 +387,16 @@ private struct TaskRow: View {
                 .buttonStyle(.borderless)
                 .help("彻底删除")
             } else if isHovered || showsDateEditor || showsPriorityEditor {
+                Button {
+                    let willExpand = !isSubtaskListExpanded
+                    withAnimation(.easeInOut(duration: 0.16)) { isSubtaskListExpanded = willExpand }
+                    if willExpand { DispatchQueue.main.async { subtaskFocused = true } }
+                } label: {
+                    Image(systemName: isSubtaskListExpanded ? "chevron.up" : "list.bullet.indent")
+                }
+                .buttonStyle(.borderless)
+                .help(isSubtaskListExpanded ? "收起子任务" : "添加或管理子任务")
+
                 Button {
                     showsPriorityEditor.toggle()
                 } label: {
@@ -319,6 +440,12 @@ private struct TaskRow: View {
                         .foregroundStyle(.white.opacity(0.55))
                 }
             }
+            }
+
+            if isSubtaskListExpanded && !isTrash {
+                subtaskList
+                    .padding(.top, 10)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
@@ -333,6 +460,39 @@ private struct TaskRow: View {
         } message: {
             Text("该操作无法撤销。")
         }
+    }
+
+    private var subtaskList: some View {
+        VStack(spacing: 8) {
+            Divider().overlay(.white.opacity(0.08))
+
+            ForEach(task.subtasks ?? []) { subtask in
+                SubtaskRow(task: task, subtask: subtask, store: store)
+                    .padding(.leading, 28)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "plus").foregroundStyle(.blue)
+                TextField("添加子任务", text: $newSubtaskTitle)
+                    .textFieldStyle(.plain)
+                    .focused($subtaskFocused)
+                    .onSubmit(addSubtask)
+                Button(action: addSubtask) {
+                    Image(systemName: "arrow.up.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
+                .disabled(newSubtaskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.leading, 28)
+            .padding(.vertical, 5)
+        }
+    }
+
+    private func addSubtask() {
+        store.addSubtask(to: task, title: newSubtaskTitle)
+        newSubtaskTitle = ""
+        subtaskFocused = true
     }
 
     private var dateEditor: some View {
@@ -365,6 +525,103 @@ private struct TaskRow: View {
     private func cancelEditing() {
         editedTitle = task.title
         isEditing = false
+    }
+}
+
+private struct SubtaskRow: View {
+    let task: TaskItem
+    let subtask: SubtaskItem
+    @ObservedObject var store: TaskStore
+
+    @State private var isHovered = false
+    @State private var showsDateEditor = false
+    @State private var showsPriorityEditor = false
+    @State private var draftDate = Date().addingTimeInterval(3600)
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Button { store.toggleSubtask(in: task, subtask: subtask) } label: {
+                Image(systemName: subtask.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(subtask.isCompleted ? .green : .white.opacity(0.45))
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(subtask.title)
+                    .font(.callout)
+                    .strikethrough(subtask.isCompleted)
+                    .foregroundStyle(subtask.isCompleted ? .white.opacity(0.4) : .white.opacity(0.86))
+                if let dueDate = subtask.dueDate {
+                    Label(dueDate.formatted(date: .abbreviated, time: .shortened), systemImage: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(dueDate < .now && !subtask.isCompleted ? .red : .white.opacity(0.42))
+                }
+            }
+            Spacer()
+
+            if isHovered || showsDateEditor || showsPriorityEditor {
+                Button { showsPriorityEditor.toggle() } label: {
+                    Circle()
+                        .fill((subtask.priority ?? .blue).color)
+                        .frame(width: 9, height: 9)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help("修改子任务等级")
+                .popover(isPresented: $showsPriorityEditor, arrowEdge: .trailing) {
+                    PriorityPickerPopover(
+                        selection: Binding(
+                            get: { subtask.priority ?? .blue },
+                            set: { store.updateSubtaskPriority(in: task, subtask: subtask, priority: $0) }
+                        ),
+                        onSelect: { showsPriorityEditor = false }
+                    )
+                }
+
+                Button {
+                    draftDate = subtask.dueDate ?? .now.addingTimeInterval(3600)
+                    showsDateEditor.toggle()
+                } label: {
+                    Image(systemName: subtask.dueDate == nil ? "clock" : "clock.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("修改子任务结束时间")
+                .popover(isPresented: $showsDateEditor, arrowEdge: .trailing) {
+                    DueDatePickerPopover(
+                        selection: $draftDate,
+                        showsClear: subtask.dueDate != nil,
+                        onClear: {
+                            store.updateSubtaskDueDate(in: task, subtask: subtask, dueDate: nil)
+                            showsDateEditor = false
+                        },
+                        onSave: {
+                            store.updateSubtaskDueDate(in: task, subtask: subtask, dueDate: draftDate)
+                            showsDateEditor = false
+                        }
+                    )
+                }
+
+                Button(role: .destructive) {
+                    store.deleteSubtask(from: task, subtask: subtask)
+                } label: {
+                    Image(systemName: "xmark").font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("删除子任务")
+            } else {
+                HStack(spacing: 5) {
+                    Circle().fill((subtask.priority ?? .blue).color).frame(width: 7, height: 7)
+                    Text((subtask.priority ?? .blue).title)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) { isHovered = hovering }
+        }
     }
 }
 

@@ -6,6 +6,7 @@ final class TaskStore: ObservableObject {
     @Published private(set) var tasks: [TaskItem] = []
     @Published var errorMessage: String?
     @Published private(set) var focusAddRequest = 0
+    @Published private(set) var resetMemoListRequest = 0
 
     private let repository: any TaskRepository
 
@@ -47,6 +48,10 @@ final class TaskStore: ObservableObject {
 
     func requestAddFocus() {
         focusAddRequest += 1
+    }
+
+    func requestMemoListReset() {
+        resetMemoListRequest += 1
     }
 
     func toggle(_ task: TaskItem) {
@@ -94,6 +99,42 @@ final class TaskStore: ObservableObject {
     func updatePriority(_ task: TaskItem, priority: TaskPriority) {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
         tasks[index].priority = priority
+        persist()
+    }
+
+    func addSubtask(to task: TaskItem, title: String) {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty,
+              let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        if tasks[index].subtasks == nil { tasks[index].subtasks = [] }
+        tasks[index].subtasks?.append(SubtaskItem(title: cleaned))
+        persist()
+    }
+
+    func toggleSubtask(in task: TaskItem, subtask: SubtaskItem) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == task.id }),
+              let subtaskIndex = tasks[taskIndex].subtasks?.firstIndex(where: { $0.id == subtask.id }) else { return }
+        tasks[taskIndex].subtasks?[subtaskIndex].isCompleted.toggle()
+        persist()
+    }
+
+    func deleteSubtask(from task: TaskItem, subtask: SubtaskItem) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[taskIndex].subtasks?.removeAll { $0.id == subtask.id }
+        persist()
+    }
+
+    func updateSubtaskDueDate(in task: TaskItem, subtask: SubtaskItem, dueDate: Date?) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == task.id }),
+              let subtaskIndex = tasks[taskIndex].subtasks?.firstIndex(where: { $0.id == subtask.id }) else { return }
+        tasks[taskIndex].subtasks?[subtaskIndex].dueDate = dueDate
+        persist()
+    }
+
+    func updateSubtaskPriority(in task: TaskItem, subtask: SubtaskItem, priority: TaskPriority) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == task.id }),
+              let subtaskIndex = tasks[taskIndex].subtasks?.firstIndex(where: { $0.id == subtask.id }) else { return }
+        tasks[taskIndex].subtasks?[subtaskIndex].priority = priority
         persist()
     }
 

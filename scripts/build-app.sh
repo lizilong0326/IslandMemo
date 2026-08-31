@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="${0:A:h:h}"
 # User-facing packages are emitted only when this script is explicitly run.
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/Resources/Info.plist")"
-APP_DIR="$ROOT_DIR/../../outputs/IslandMemo-v${VERSION}.app"
+APP_DIR="$ROOT_DIR/../../outputs/丫丫灵动-v${VERSION}.app"
 
 cd "$ROOT_DIR"
 mkdir -p "$ROOT_DIR/.cache/clang" "$ROOT_DIR/.cache/swiftpm" "$ROOT_DIR/.cache/config" "$ROOT_DIR/.cache/security"

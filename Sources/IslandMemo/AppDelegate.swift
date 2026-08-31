@@ -6,6 +6,7 @@ import Carbon.HIToolbox
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = TaskStore(repository: LocalTaskRepository())
+    private let clipboardStore = ClipboardStore()
     private var panel: IslandPanel!
     private var drawerView: NSView!
     private var statusItem: NSStatusItem!
@@ -25,7 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupGlobalHotKey()
         setupDismissMonitors()
         store.load()
+        clipboardStore.startMonitoring()
         startHoverTracking()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        hoverTimer?.invalidate()
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
     }
 
     private func setupPanel() {
@@ -35,7 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        let hostingView = NSHostingView(rootView: IslandView(store: store))
+        let hostingView = NSHostingView(rootView: IslandView(store: store, clipboardStore: clipboardStore))
         hostingView.wantsLayer = true
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView = hostingView
@@ -50,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "checklist", accessibilityDescription: "灵岛备忘")
+        statusItem.button?.image = NSImage(systemSymbolName: "checklist", accessibilityDescription: "丫丫灵动")
 
         let menu = NSMenu()
         menu.addItem(withTitle: "打开备忘录  ⇧⌘+", action: #selector(openFromMenu), keyEquivalent: "o")
@@ -58,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let versionItem = menu.addItem(withTitle: "版本 \(version)", action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
         menu.addItem(.separator())
-        menu.addItem(withTitle: "退出灵岛备忘", action: #selector(quit), keyEquivalent: "q")
+        menu.addItem(withTitle: "退出丫丫灵动", action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
         statusItem.menu = menu
     }
@@ -84,9 +92,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startHoverTracking() {
-        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
+        hoverTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkPointer() }
         }
+        timer.tolerance = 0.01
+        RunLoop.main.add(timer, forMode: .common)
+        hoverTimer = timer
+        checkPointer()
     }
 
     private func checkPointer() {
@@ -116,16 +129,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(on screen: NSScreen) {
-        guard !panel.isVisible || isAnimatingOut else { return }
-        isAnimatingIn = true
-        isAnimatingOut = false
         let size = panel.frame.size
         let x = screen.frame.midX - size.width / 2
         let expandedY = screen.frame.maxY - size.height
+        let targetOrigin = NSPoint(x: x, y: expandedY)
+
+        // If the pointer reaches the notch on another display while the drawer is
+        // already visible, move it to that display instead of leaving it behind.
+        if panel.isVisible && !isAnimatingOut {
+            if abs(panel.frame.origin.x - targetOrigin.x) > 0.5
+                || abs(panel.frame.origin.y - targetOrigin.y) > 0.5 {
+                panel.setFrameOrigin(targetOrigin)
+            }
+            return
+        }
+
+        isAnimatingIn = true
+        isAnimatingOut = false
         if !panel.isVisible {
             // Keep the real window in its final position. Only its clipped content
             // moves, avoiding off-screen NSPanel frame constraints near the notch.
-            panel.setFrameOrigin(NSPoint(x: x, y: expandedY))
+            panel.setFrameOrigin(targetOrigin)
             drawerView.frame = NSRect(origin: NSPoint(x: 0, y: size.height - 42), size: size)
             panel.alphaValue = 1
             panel.orderFrontRegardless()
@@ -157,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.isAnimatingOut else { return }
                 self.panel.orderOut(nil)
                 self.isAnimatingOut = false
+                self.store.requestMemoListReset()
             }
         }
     }
