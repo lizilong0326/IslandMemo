@@ -1,15 +1,16 @@
 # 丫丫灵动（IslandMemo）
 
-一个轻量、原生的 macOS 菜单栏任务备忘录。将鼠标移动到当前屏幕顶部中央，任务面板便会像“灵动岛”一样展开；也可以使用全局快捷键随时唤出。
+一个轻量、原生的 macOS 菜单栏任务备忘录。单击当前屏幕刘海位置，任务面板便会像“灵动岛”一样展开；也可以使用可自定义的全局快捷键随时唤出。
 
 ![IslandMemo 任务面板预览](assets/islandmemo-preview.png)
 
 ## 功能
 
-- 顶部中央悬停自动展开，移开后自动收起
+- 单击屏幕刘海位置展开，移开后自动收起
 - 使用 `Shift + Command + +` 快速打开或关闭面板
 - 新建、完成和删除任务
 - 设置任务优先级与截止时间
+- 在截止前 24 小时、12 小时、6 小时、3 小时、1 小时和 10 分钟发送系统通知
 - 按逾期、今天、明天、未来和未设置时间自动分组
 - 双击任务名称进行编辑
 - 从回收站恢复任务
@@ -20,6 +21,12 @@
 
 - macOS 13 Ventura 或更高版本
 - Swift 6.0 工具链（从源码构建时需要）
+
+## 直接下载安装
+
+[下载丫丫灵动 v0.2.12](https://github.com/lizilong0326/IslandMemo/raw/refs/heads/main/downloads/%E4%B8%AB%E4%B8%AB%E7%81%B5%E5%8A%A8-v0.2.12.zip)
+
+下载后解压，将 `丫丫灵动-v0.2.12.app` 拖入“应用程序”文件夹即可使用。当前安装包采用本地临时签名；如果 macOS 首次打开时阻止运行，请在 Finder 中右键应用并选择“打开”。
 
 ## 从源码运行
 
@@ -56,6 +63,7 @@ chmod +x scripts/build-app.sh
 
 ```text
 IslandMemo/
+├── downloads/
 ├── Package.swift
 ├── Resources/
 ├── Sources/IslandMemo/

@@ -7,10 +7,15 @@ import Carbon.HIToolbox
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = TaskStore(repository: LocalTaskRepository())
     private let clipboardStore = ClipboardStore()
+    private lazy var reminderScheduler = TaskReminderScheduler { [weak self] in
+        self?.store.tasks ?? []
+    }
     private var panel: IslandPanel!
     private var drawerView: NSView!
     private var statusItem: NSStatusItem!
-    private var hoverTimer: Timer?
+    private var openMenuItem: NSMenuItem?
+    private var shortcutConfiguration = ShortcutConfiguration.load()
+    private var pointerTrackingTimer: Timer?
     private var globalHotKey: GlobalHotKey?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
@@ -26,12 +31,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupGlobalHotKey()
         setupDismissMonitors()
         store.load()
+        reminderScheduler.start()
         clipboardStore.startMonitoring()
-        startHoverTracking()
+        startPointerTracking()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        hoverTimer?.invalidate()
+        pointerTrackingTimer?.invalidate()
+        reminderScheduler.stop()
+        globalHotKey?.invalidate()
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
     }
@@ -61,7 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "checklist", accessibilityDescription: "丫丫灵动")
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "打开备忘录  ⇧⌘+", action: #selector(openFromMenu), keyEquivalent: "o")
+        openMenuItem = menu.addItem(
+            withTitle: "打开备忘录  \(shortcutConfiguration.displayText)",
+            action: #selector(openFromMenu),
+            keyEquivalent: "o"
+        )
+        menu.addItem(withTitle: "修改快捷键…", action: #selector(editShortcut), keyEquivalent: "")
+        menu.addItem(.separator())
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
         let versionItem = menu.addItem(withTitle: "版本 \(version)", action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
@@ -73,8 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupGlobalHotKey() {
         globalHotKey = GlobalHotKey(
-            keyCode: UInt32(kVK_ANSI_Equal),
-            modifiers: UInt32(cmdKey | shiftKey)
+            keyCode: shortcutConfiguration.keyCode,
+            modifiers: shortcutConfiguration.modifiers
         ) { [weak self] in
             self?.toggleHotKeyPanel()
         }
@@ -82,30 +96,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupDismissMonitors() {
         let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) { [weak self] _ in
-            Task { @MainActor in self?.dismissHotKeyPanelIfClickedOutside() }
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) { [weak self] event in
+            Task { @MainActor in self?.handleMouseDown(event) }
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) { [weak self] event in
-            Task { @MainActor in self?.dismissHotKeyPanelIfClickedOutside() }
+            MainActor.assumeIsolated { self?.handleLocalMouseDown(event) }
             return event
         }
     }
 
-    private func startHoverTracking() {
-        hoverTimer?.invalidate()
+    private func startPointerTracking() {
+        pointerTrackingTimer?.invalidate()
         let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkPointer() }
         }
         timer.tolerance = 0.01
         RunLoop.main.add(timer, forMode: .common)
-        hoverTimer = timer
+        pointerTrackingTimer = timer
         checkPointer()
     }
 
     private func checkPointer() {
+        // Pointer movement may only keep an already-open panel visible or hide it.
+        // Opening is exclusively handled by click, shortcut, or menu actions.
+        guard panel.isVisible else { return }
         guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
         let pointer = NSEvent.mouseLocation
-        let trigger = notchTrigger(on: screen)
         // Date editing is presented in a separate popover window. Treat that popover
         // as part of the drawer so it remains usable while the main panel is open.
         let insidePanelOrPopover = isInsideDrawerOrPopover(pointer)
@@ -121,9 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if trigger.contains(pointer) || insidePanelOrPopover {
-            showPanel(on: screen)
-        } else if panel.isVisible && !isAnimatingIn && !isAnimatingOut {
+        if !insidePanelOrPopover && !isAnimatingIn && !isAnimatingOut {
             hidePanel(on: screen)
         }
     }
@@ -200,7 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The gap between the two unobscured menu-bar areas is the physical notch.
             // A 3pt horizontal allowance prevents precision issues without occupying
             // any of the usable content directly below it.
-            let height = min(max(screen.safeAreaInsets.top, 28), 42)
+            let menuBarHeight = max(
+                screen.safeAreaInsets.top,
+                screen.frame.maxY - screen.visibleFrame.maxY
+            )
+            let height = min(max(menuBarHeight + 8, 36), 54)
             return NSRect(
                 x: leftArea.maxX - 3,
                 y: screen.frame.maxY - height,
@@ -219,7 +237,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func isInsideDrawerOrPopover(_ point: NSPoint) -> Bool {
-        NSApp.windows.contains { $0.isVisible && $0.frame.contains(point) }
+        if let button = statusItem.button,
+           let window = button.window {
+            let buttonFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
+            if buttonFrame.contains(point) { return true }
+        }
+        return NSApp.windows.contains { $0.isVisible && $0.frame.contains(point) }
+    }
+
+    private func handleLocalMouseDown(_ event: NSEvent) {
+        // Capture this synchronously, before a SwiftUI popover's Save action closes
+        // and destroys its window. The pointer can then remain outside the drawer
+        // without being mistaken for a leave event.
+        if isPinnedByHotKey,
+           panel.isVisible,
+           let eventWindow = event.window,
+           eventWindow !== panel {
+            hasPointerEnteredAfterHotKey = false
+            return
+        }
+        handleMouseDown(event)
+    }
+
+    private func handleMouseDown(_ event: NSEvent) {
+        let pointer = NSEvent.mouseLocation
+        guard let screen = screenContainingMouse() ?? NSScreen.main else { return }
+
+        if event.type == .leftMouseDown,
+           (!panel.isVisible || isAnimatingOut),
+           notchTrigger(on: screen).contains(pointer) {
+            isPinnedByHotKey = true
+            hasPointerEnteredAfterHotKey = false
+            showPanel(on: screen)
+            hasPointerEnteredAfterHotKey = isInsideDrawerOrPopover(pointer)
+            return
+        }
+
+        dismissHotKeyPanelIfClickedOutside()
     }
 
     private func dismissHotKeyPanelIfClickedOutside() {
@@ -244,6 +298,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         store.requestAddFocus()
+    }
+
+    @objc private func editShortcut() {
+        let recorder = ShortcutRecorderView(initial: shortcutConfiguration)
+        let alert = NSAlert()
+        alert.messageText = "修改快捷键"
+        alert.informativeText = "点击下方区域，然后按下新的组合键。快捷键必须包含 Command、Option 或 Control。"
+        alert.accessoryView = recorder
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { alert.window.makeFirstResponder(recorder) }
+
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let configuration = recorder.capturedConfiguration else { return }
+        guard configuration != shortcutConfiguration else { return }
+
+        let previousConfiguration = shortcutConfiguration
+        globalHotKey?.invalidate()
+        globalHotKey = nil
+        let candidate = makeGlobalHotKey(configuration)
+        guard candidate.isRegistered else {
+            candidate.invalidate()
+            globalHotKey = makeGlobalHotKey(previousConfiguration)
+            let errorAlert = NSAlert()
+            errorAlert.messageText = "快捷键无法使用"
+            errorAlert.informativeText = "这个组合键可能已被其他应用占用，请换一个再试。"
+            errorAlert.runModal()
+            return
+        }
+
+        globalHotKey = candidate
+        shortcutConfiguration = configuration
+        shortcutConfiguration.save()
+        openMenuItem?.title = "打开备忘录  \(configuration.displayText)"
+    }
+
+    private func makeGlobalHotKey(_ configuration: ShortcutConfiguration) -> GlobalHotKey {
+        GlobalHotKey(keyCode: configuration.keyCode, modifiers: configuration.modifiers) { [weak self] in
+            self?.toggleHotKeyPanel()
+        }
     }
 
     private func toggleHotKeyPanel() {

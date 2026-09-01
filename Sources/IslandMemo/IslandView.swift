@@ -166,6 +166,7 @@ struct IslandView: View {
                 showsNewTaskDateEditor.toggle()
             } label: {
                 Image(systemName: hasDueDate ? "clock.fill" : "clock")
+                    .foregroundStyle(hasDueDate ? Color.blue : Color.white.opacity(0.62))
             }
             .buttonStyle(.borderless)
             .help("设置结束时间")

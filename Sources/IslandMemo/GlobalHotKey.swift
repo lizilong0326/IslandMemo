@@ -5,6 +5,7 @@ final class GlobalHotKey {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private let action: () -> Void
+    private(set) var isRegistered = false
 
     init(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
         self.action = action
@@ -30,7 +31,7 @@ final class GlobalHotKey {
         )
 
         let identifier = EventHotKeyID(signature: OSType(0x494D454D), id: 1) // IMEM
-        RegisterEventHotKey(
+        let status = RegisterEventHotKey(
             keyCode,
             modifiers,
             identifier,
@@ -38,6 +39,18 @@ final class GlobalHotKey {
             0,
             &hotKeyRef
         )
+        isRegistered = status == noErr
     }
 
+    func invalidate() {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+        if let eventHandler {
+            RemoveEventHandler(eventHandler)
+            self.eventHandler = nil
+        }
+        isRegistered = false
+    }
 }
