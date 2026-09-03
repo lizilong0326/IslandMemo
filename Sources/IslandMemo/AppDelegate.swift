@@ -7,11 +7,24 @@ import Carbon.HIToolbox
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = TaskStore(repository: LocalTaskRepository())
     private let clipboardStore = ClipboardStore()
+    private let linksStore = LinksStore()
+    private let commandsStore = CommandsStore()
+    private let pomodoroStore = PomodoroStore()
+    private let recordingsStore = RecordingStore()
+    private let credentialsStore = CredentialsStore()
+    private let musicService = MusicService()
+    private let windowListService = WindowListService()
+    private let notifyServer = AgentNotifyServer()
+    private let codexStatusStore = CodexStatusStore()
+    private let aiApplicationDetector = AIApplicationDetector()
+    private let appSettings = AppSettingsStore()
+    private let panelMetrics = PanelMetrics()
     private lazy var reminderScheduler = TaskReminderScheduler { [weak self] in
         self?.store.tasks ?? []
     }
     private var panel: IslandPanel!
     private var drawerView: NSView!
+    private var displaySettingsWindow: NSWindow?
     private var statusItem: NSStatusItem!
     private var openMenuItem: NSMenuItem?
     private var shortcutConfiguration = ShortcutConfiguration.load()
@@ -23,9 +36,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isAnimatingOut = false
     private var isPinnedByHotKey = false
     private var hasPointerEnteredAfterHotKey = false
+    private var pointerOutsideSince: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        appSettings.canDisableHomeModule = { [weak recordingsStore] module in
+            (module != .recorder && module != .recordings) || recordingsStore?.state == .idle
+        }
+        appSettings.onClipboardConfigurationChanged = { [weak clipboardStore] in
+            clipboardStore?.applyPreferences()
+        }
         setupPanel()
         setupMenuBar()
         setupGlobalHotKey()
@@ -33,12 +53,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.load()
         reminderScheduler.start()
         clipboardStore.startMonitoring()
+        notifyServer.start()
+        codexStatusStore.start()
+        aiApplicationDetector.scan()
         startPointerTracking()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         pointerTrackingTimer?.invalidate()
         reminderScheduler.stop()
+        notifyServer.stop()
+        codexStatusStore.stop()
         globalHotKey?.invalidate()
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
@@ -46,12 +71,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupPanel() {
         panel = IslandPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 444, height: 524),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: IslandTheme.panelWidth,
+                height: panelMetrics.topInset
+                    + IslandTheme.topbarHeight
+                    + IslandTheme.s3
+                    + IslandTheme.panelContentHeight
+                    + IslandTheme.s4
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        let hostingView = NSHostingView(rootView: IslandView(store: store, clipboardStore: clipboardStore))
+        let hostingView = NSHostingView(rootView: IslandView(
+            store: store,
+            clipboardStore: clipboardStore,
+            linksStore: linksStore,
+            commandsStore: commandsStore,
+            pomodoroStore: pomodoroStore,
+            recordingsStore: recordingsStore,
+            credentialsStore: credentialsStore,
+            musicService: musicService,
+            windowListService: windowListService,
+            notifyServer: notifyServer,
+            codexStatusStore: codexStatusStore,
+            appSettings: appSettings,
+            panelMetrics: panelMetrics,
+            onOpenDisplaySettings: { [weak self] in self?.openSettingsFromPanel() }
+        ))
         hostingView.wantsLayer = true
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView = hostingView
@@ -70,11 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         openMenuItem = menu.addItem(
-            withTitle: "打开备忘录  \(shortcutConfiguration.displayText)",
+            withTitle: "打开丫丫灵动  \(shortcutConfiguration.displayText)",
             action: #selector(openFromMenu),
             keyEquivalent: "o"
         )
         menu.addItem(withTitle: "修改快捷键…", action: #selector(editShortcut), keyEquivalent: "")
+        menu.addItem(withTitle: "打开设置中心…", action: #selector(openDisplaySettings), keyEquivalent: ",")
         menu.addItem(.separator())
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
         let versionItem = menu.addItem(withTitle: "版本 \(version)", action: nil, keyEquivalent: "")
@@ -128,8 +178,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if isPinnedByHotKey {
             if insidePanelOrPopover {
+                pointerOutsideSince = nil
                 hasPointerEnteredAfterHotKey = true
             } else if hasPointerEnteredAfterHotKey && panel.isVisible && !isAnimatingIn && !isAnimatingOut {
+                guard pointerHasStayedOutsideLongEnough() else { return }
                 isPinnedByHotKey = false
                 hasPointerEnteredAfterHotKey = false
                 hidePanel(on: screen)
@@ -137,23 +189,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if !insidePanelOrPopover && !isAnimatingIn && !isAnimatingOut {
+        if insidePanelOrPopover {
+            pointerOutsideSince = nil
+        } else if !isAnimatingIn && !isAnimatingOut && pointerHasStayedOutsideLongEnough() {
             hidePanel(on: screen)
         }
     }
 
+    private func pointerHasStayedOutsideLongEnough() -> Bool {
+        let now = Date()
+        guard let pointerOutsideSince else {
+            self.pointerOutsideSince = now
+            return false
+        }
+        return now.timeIntervalSince(pointerOutsideSince) >= 0.5
+    }
+
     private func showPanel(on screen: NSScreen) {
-        let size = panel.frame.size
+        pointerOutsideSince = nil
+        // 顶边距 = 菜单栏高 + 4，让顶栏避让物理刘海；宽度按屏 clamp。
+        let menuBarHeight = max(
+            screen.safeAreaInsets.top,
+            screen.frame.maxY - screen.visibleFrame.maxY
+        )
+        panelMetrics.topInset = menuBarHeight + 4
+        let size = NSSize(
+            width: min(IslandTheme.panelWidth, screen.frame.width - 24),
+            height: menuBarHeight + 4 + IslandTheme.topbarHeight + IslandTheme.s3
+                + IslandTheme.panelContentHeight + IslandTheme.s4
+        )
         let x = screen.frame.midX - size.width / 2
         let expandedY = screen.frame.maxY - size.height
-        let targetOrigin = NSPoint(x: x, y: expandedY)
+        let targetFrame = NSRect(origin: NSPoint(x: x, y: expandedY), size: size)
 
         // If the pointer reaches the notch on another display while the drawer is
         // already visible, move it to that display instead of leaving it behind.
         if panel.isVisible && !isAnimatingOut {
-            if abs(panel.frame.origin.x - targetOrigin.x) > 0.5
-                || abs(panel.frame.origin.y - targetOrigin.y) > 0.5 {
-                panel.setFrameOrigin(targetOrigin)
+            if abs(panel.frame.origin.x - targetFrame.origin.x) > 0.5
+                || abs(panel.frame.origin.y - targetFrame.origin.y) > 0.5
+                || abs(panel.frame.width - targetFrame.width) > 0.5 {
+                panel.setFrame(targetFrame, display: true)
             }
             return
         }
@@ -163,7 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !panel.isVisible {
             // Keep the real window in its final position. Only its clipped content
             // moves, avoiding off-screen NSPanel frame constraints near the notch.
-            panel.setFrameOrigin(targetOrigin)
+            panel.setFrame(targetFrame, display: false)
             drawerView.frame = NSRect(origin: NSPoint(x: 0, y: size.height - 42), size: size)
             panel.alphaValue = 1
             panel.orderFrontRegardless()
@@ -182,6 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func hidePanel(on screen: NSScreen) {
+        pointerOutsideSince = nil
+        panelMetrics.panelWillHide()
         isAnimatingIn = false
         isAnimatingOut = true
         NSAnimationContext.runAnimationGroup { context in
@@ -254,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let eventWindow = event.window,
            eventWindow !== panel {
             hasPointerEnteredAfterHotKey = false
+            pointerOutsideSince = nil
             return
         }
         handleMouseDown(event)
@@ -287,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         isPinnedByHotKey = false
         hasPointerEnteredAfterHotKey = false
+        pointerOutsideSince = nil
         hidePanel(on: screen)
     }
 
@@ -332,7 +411,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         globalHotKey = candidate
         shortcutConfiguration = configuration
         shortcutConfiguration.save()
-        openMenuItem?.title = "打开备忘录  \(configuration.displayText)"
+        appSettings.updateShortcutDisplayText(configuration.displayText)
+        openMenuItem?.title = "打开丫丫灵动  \(configuration.displayText)"
+    }
+
+    @objc private func openDisplaySettings() {
+        if let displaySettingsWindow {
+            displaySettingsWindow.center()
+            displaySettingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "丫丫灵动 · 设置中心"
+        window.contentView = NSHostingView(rootView: DisplaySettingsView(
+            settings: appSettings,
+            pomodoro: pomodoroStore,
+            recordings: recordingsStore,
+            notifyServer: notifyServer,
+            aiApplications: aiApplicationDetector,
+            music: musicService,
+            onEditShortcut: { [weak self] in self?.editShortcut() }
+        ))
+        window.isReleasedWhenClosed = false
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = .black
+        window.center()
+        displaySettingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openSettingsFromPanel() {
+        if panel.isVisible, let screen = screenContainingMouse() ?? panel.screen ?? NSScreen.main {
+            isPinnedByHotKey = false
+            hasPointerEnteredAfterHotKey = false
+            hidePanel(on: screen)
+        }
+        openDisplaySettings()
     }
 
     private func makeGlobalHotKey(_ configuration: ShortcutConfiguration) -> GlobalHotKey {

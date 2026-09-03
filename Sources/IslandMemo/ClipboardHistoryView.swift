@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ClipboardHistoryView: View {
     @ObservedObject var store: ClipboardStore
+    @ObservedObject var settings: AppSettingsStore
 
     var body: some View {
         Group {
@@ -15,9 +16,16 @@ struct ClipboardHistoryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(store.entries) { entry in
-                            clipboardRow(entry)
+                    HStack(alignment: .top, spacing: 10) {
+                        LazyVStack(spacing: 10) {
+                            ForEach(Array(store.entries.enumerated()).filter { $0.offset.isMultiple(of: 2) }, id: \.element.id) { _, entry in
+                                clipboardRow(entry)
+                            }
+                        }
+                        LazyVStack(spacing: 10) {
+                            ForEach(Array(store.entries.enumerated()).filter { !$0.offset.isMultiple(of: 2) }, id: \.element.id) { _, entry in
+                                clipboardRow(entry)
+                            }
                         }
                     }
                 }
@@ -32,7 +40,8 @@ struct ClipboardHistoryView: View {
             case .text:
                 Text(entry.text ?? "")
                     .font(.callout)
-                    .lineLimit(3)
+                    .lineLimit(settings.clipboardPreviewLines)
+                    .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
             case .image:
@@ -47,7 +56,8 @@ struct ClipboardHistoryView: View {
             HStack(spacing: 8) {
                 Text(entry.copiedAt.formatted(.dateTime.year().month().day().hour().minute().second()))
                     .font(.caption2).foregroundStyle(.white.opacity(0.42))
-                if let source = entry.sourceApplication, !source.isEmpty {
+                if settings.clipboardShowSource,
+                   let source = entry.sourceApplication, !source.isEmpty {
                     Text("· \(source)")
                         .font(.caption2).foregroundStyle(.white.opacity(0.42))
                         .lineLimit(1)

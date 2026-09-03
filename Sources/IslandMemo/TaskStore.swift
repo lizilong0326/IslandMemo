@@ -39,10 +39,10 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    func add(title: String, dueDate: Date?, priority: TaskPriority = .blue) {
+    func add(title: String, dueDate: Date?, priority: TaskPriority = .blue, categoryID: String? = nil) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        tasks.append(TaskItem(title: cleaned, dueDate: dueDate, priority: priority))
+        tasks.append(TaskItem(title: cleaned, dueDate: dueDate, priority: priority, categoryID: categoryID))
         persist()
     }
 
@@ -99,6 +99,12 @@ final class TaskStore: ObservableObject {
     func updatePriority(_ task: TaskItem, priority: TaskPriority) {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
         tasks[index].priority = priority
+        persist()
+    }
+
+    func updateCategory(_ task: TaskItem, categoryID: String?) {
+        guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[index].categoryID = categoryID
         persist()
     }
 

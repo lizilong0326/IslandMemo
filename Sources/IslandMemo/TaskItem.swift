@@ -32,16 +32,20 @@ struct TaskItem: Identifiable, Codable, Equatable, Sendable {
     var isCompleted: Bool
     var deletedAt: Date?
     var priority: TaskPriority?
+    /// Stable identifier of the memo category. Missing values from older data
+    /// are resolved to the first visible category by the UI.
+    var categoryID: String?
     var subtasks: [SubtaskItem]?
     let createdAt: Date
 
-    init(id: UUID = UUID(), title: String, dueDate: Date? = nil, isCompleted: Bool = false, deletedAt: Date? = nil, priority: TaskPriority = .blue, subtasks: [SubtaskItem] = [], createdAt: Date = .now) {
+    init(id: UUID = UUID(), title: String, dueDate: Date? = nil, isCompleted: Bool = false, deletedAt: Date? = nil, priority: TaskPriority = .blue, categoryID: String? = nil, subtasks: [SubtaskItem] = [], createdAt: Date = .now) {
         self.id = id
         self.title = title
         self.dueDate = dueDate
         self.isCompleted = isCompleted
         self.deletedAt = deletedAt
         self.priority = priority
+        self.categoryID = categoryID
         self.subtasks = subtasks
         self.createdAt = createdAt
     }

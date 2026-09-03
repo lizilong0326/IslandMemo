@@ -9,7 +9,88 @@ private enum MemoSection: String, CaseIterable, Identifiable {
 private enum AppTab: String, CaseIterable, Identifiable {
     case memo = "备忘录"
     case clipboard = "复制记录"
+    case home = "首页"
+    case links = "链接"
+    case recordings = "录制"
+    case credentials = "密钥"
+    case music = "音乐"
+    case pomodoro = "番茄钟"
+    case recorder = "快速录音"
+    case windows = "当前窗口"
+    case mirror = "镜子"
+    case note = "随笔记"
+    case commands = "常用指令"
+    case clock = "时钟"
+    case calendar = "日历"
+    case completions = "AI 任务"
+    case settings = "设置"
     var id: Self { self }
+
+    var systemImage: String {
+        switch self {
+        case .memo: return "checklist"
+        case .clipboard: return "doc.on.clipboard"
+        case .home: return "square.grid.2x2"
+        case .links: return "link"
+        case .recordings: return "waveform"
+        case .credentials: return "key"
+        case .music: return "music.note"
+        case .pomodoro: return "timer"
+        case .recorder: return "record.circle"
+        case .windows: return "macwindow"
+        case .mirror: return "camera"
+        case .note: return "pencil.line"
+        case .commands: return "command"
+        case .clock: return "clock"
+        case .calendar: return "calendar"
+        case .completions: return "sparkles"
+        case .settings: return "gearshape"
+        }
+    }
+
+    var feature: AppSettingsStore.Feature {
+        switch self {
+        case .memo: return .memo
+        case .clipboard: return .clipboard
+        case .home: return .home
+        case .links: return .links
+        case .recordings: return .recordings
+        case .credentials: return .credentials
+        case .music: return .music
+        case .pomodoro: return .pomodoro
+        case .recorder: return .recorder
+        case .windows: return .windows
+        case .mirror: return .mirror
+        case .note: return .note
+        case .commands: return .commands
+        case .clock: return .clock
+        case .calendar: return .calendar
+        case .completions: return .completions
+        case .settings: return .settings
+        }
+    }
+
+    init(feature: AppSettingsStore.Feature) {
+        switch feature {
+        case .memo: self = .memo
+        case .clipboard: self = .clipboard
+        case .home: self = .home
+        case .links: self = .links
+        case .recordings: self = .recordings
+        case .credentials: self = .credentials
+        case .music: self = .music
+        case .pomodoro: self = .pomodoro
+        case .recorder: self = .recorder
+        case .windows: self = .windows
+        case .mirror: self = .mirror
+        case .note: self = .note
+        case .commands: self = .commands
+        case .clock: self = .clock
+        case .calendar: self = .calendar
+        case .completions: self = .completions
+        case .settings: self = .settings
+        }
+    }
 }
 
 private enum TaskCompletionFilter: String, CaseIterable, Identifiable {
@@ -21,12 +102,26 @@ private enum TaskCompletionFilter: String, CaseIterable, Identifiable {
 struct IslandView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var clipboardStore: ClipboardStore
+    @ObservedObject var linksStore: LinksStore
+    @ObservedObject var commandsStore: CommandsStore
+    @ObservedObject var pomodoroStore: PomodoroStore
+    @ObservedObject var recordingsStore: RecordingStore
+    @ObservedObject var credentialsStore: CredentialsStore
+    @ObservedObject var musicService: MusicService
+    @ObservedObject var windowListService: WindowListService
+    @ObservedObject var notifyServer: AgentNotifyServer
+    @ObservedObject var codexStatusStore: CodexStatusStore
+    @ObservedObject var appSettings: AppSettingsStore
+    @ObservedObject var panelMetrics: PanelMetrics
+    let onOpenDisplaySettings: () -> Void
     @State private var title = ""
     @State private var hasDueDate = false
     @State private var dueDate = Date().addingTimeInterval(3600)
     @State private var showsNewTaskDateEditor = false
     @State private var newTaskPriority: TaskPriority = .blue
     @State private var showsPriorityPicker = false
+    @State private var newTaskCategoryID: String?
+    @State private var showsCategoryPicker = false
     @State private var showsEmptyTrashConfirmation = false
     @State private var section: MemoSection = .tasks
     @State private var selectedTab: AppTab = .memo
@@ -35,46 +130,111 @@ struct IslandView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            BottomRoundedRectangle(radius: 28)
-                .fill(Color.black.opacity(0.92))
+            BottomRoundedRectangle(radius: IslandTheme.radiusPanel)
+                .fill(IslandTheme.background)
+            // 底沿渐变描边，对齐参考项目的标志性边缘光。
+            BottomRoundedRectangle(radius: IslandTheme.radiusPanel)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.purple.opacity(0.35),
+                            IslandTheme.accentBlue.opacity(0.22),
+                            IslandTheme.accentGreen.opacity(0.28),
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    lineWidth: 1
+                )
 
-            VStack(spacing: 16) {
-                if selectedTab == .memo {
+            VStack(spacing: IslandTheme.s3) {
+                topbar
+                    .frame(height: IslandTheme.topbarHeight)
+
+                switch selectedTab {
+                case .memo:
                     if section == .tasks {
-                        completionTabBar
+                        if appSettings.memoCompletedEnabled { completionTabBar }
                         if completionFilter == .incomplete { addTaskArea }
                     }
                     content
-                } else {
-                    ClipboardHistoryView(store: clipboardStore)
+                case .clipboard:
+                    ClipboardHistoryView(store: clipboardStore, settings: appSettings)
+                case .home:
+                    HomeView(
+                        tasks: store,
+                        clipboard: clipboardStore,
+                        links: linksStore,
+                        credentials: credentialsStore,
+                        pomodoro: pomodoroStore,
+                        music: musicService,
+                        windows: windowListService,
+                        commands: commandsStore,
+                        recordings: recordingsStore,
+                        notifyServer: notifyServer,
+                        codexStatus: codexStatusStore,
+                        panelMetrics: panelMetrics,
+                        settings: appSettings
+                    )
+                case .links:
+                    LinksView(store: linksStore, settings: appSettings)
+                case .recordings:
+                    RecordingsView(store: recordingsStore)
+                case .credentials:
+                    CredentialsView(store: credentialsStore, settings: appSettings)
+                case .music: standaloneModule(.music)
+                case .pomodoro: standaloneModule(.pomodoro)
+                case .recorder: standaloneModule(.recorder)
+                case .windows: standaloneModule(.windows)
+                case .mirror: standaloneModule(.mirror)
+                case .note: standaloneModule(.note)
+                case .commands: standaloneModule(.commands)
+                case .clock: standaloneModule(.clock)
+                case .calendar: standaloneModule(.calendar)
+                case .completions: standaloneModule(.completions)
+                case .settings:
+                    EmptyView()
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 70)
-            .padding(.top, 74)
+            .padding(.horizontal, IslandTheme.s6)
+            .padding(.top, panelMetrics.topInset)
+            .padding(.bottom, IslandTheme.s4)
             .frame(maxHeight: .infinity, alignment: .top)
-
-            header
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-
-            VStack {
-                Spacer()
-                bottomTabBar
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 12)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .preferredColorScheme(.dark)
+        .tint(IslandTheme.accentBlue)
+        .onAppear {
+            if !visibleTabs.contains(selectedTab), let first = visibleTabs.first {
+                selectedTab = first
             }
         }
-        .frame(width: 444, height: 524)
-        .preferredColorScheme(.dark)
         .onChange(of: store.focusAddRequest) { _ in
-            selectedTab = .memo
-            section = .tasks
-            completionFilter = .incomplete
-            DispatchQueue.main.async { titleFocused = true }
+            if appSettings.workspacePlacement(for: .memo) == .tab {
+                selectedTab = .memo
+                section = .tasks
+                completionFilter = .incomplete
+                DispatchQueue.main.async { titleFocused = true }
+            } else if appSettings.workspacePlacement(for: .memo) == .home {
+                selectedTab = .home
+            } else if let first = visibleTabs.first {
+                selectedTab = first
+            }
         }
         .onChange(of: store.resetMemoListRequest) { _ in
             completionFilter = .incomplete
+        }
+        .onChange(of: appSettings.enabledFeatures) { _ in
+            if !visibleTabs.contains(selectedTab), let first = visibleTabs.first { selectedTab = first }
+        }
+        .onChange(of: appSettings.featureOrder) { _ in
+            if !visibleTabs.contains(selectedTab), let first = visibleTabs.first { selectedTab = first }
+        }
+        .onChange(of: appSettings.memoCompletedEnabled) { enabled in
+            if !enabled { completionFilter = .incomplete }
+        }
+        .onChange(of: appSettings.memoTrashEnabled) { enabled in
+            if !enabled { section = .tasks }
         }
         .alert("提示", isPresented: Binding(
             get: { store.errorMessage != nil },
@@ -84,34 +244,105 @@ struct IslandView: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Text(selectedTab.rawValue).font(.title2.bold())
-            Spacer()
+    private func standaloneModule(_ module: AppSettingsStore.HomeModule) -> some View {
+        HomeView(
+            tasks: store,
+            clipboard: clipboardStore,
+            links: linksStore,
+            credentials: credentialsStore,
+            pomodoro: pomodoroStore,
+            music: musicService,
+            windows: windowListService,
+            commands: commandsStore,
+            recordings: recordingsStore,
+            notifyServer: notifyServer,
+            codexStatus: codexStatusStore,
+            panelMetrics: panelMetrics,
+            settings: appSettings,
+            standaloneModule: module
+        )
+    }
+
+    // MARK: - 顶栏（对齐参考项目：左侧胶囊 Tabs，中央留刘海安全区，右侧图标按钮）
+
+    private var topbar: some View {
+        HStack(spacing: IslandTheme.s3) {
+            capsuleTabs
             if selectedTab == .memo {
-                Button { section = .tasks } label: {
-                    Image(systemName: "checklist")
-                        .foregroundStyle(section == .tasks ? .blue : .white.opacity(0.55))
-                }
-                .buttonStyle(.borderless)
-                .help("任务列表")
-                Button { section = .trash } label: {
-                    Image(systemName: "trash")
-                        .foregroundStyle(section == .trash ? .blue : .white.opacity(0.55))
-                }
-                .buttonStyle(.borderless)
-                .help("回收站")
+                memoSectionButtons
+            }
+            utilityIcon(systemImage: "gearshape", active: false, help: "打开设置") {
+                onOpenDisplaySettings()
             }
         }
     }
 
-    private var bottomTabBar: some View {
-        HStack(spacing: 6) {
-            tabButton(.memo, systemImage: "checklist")
-            tabButton(.clipboard, systemImage: "doc.on.clipboard")
+    private var capsuleTabs: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: IslandTheme.s1) {
+                ForEach(visibleTabs) { tab in
+                    capsuleTabButton(tab)
+                }
+            }
+            .padding(3)
         }
-        .padding(5)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+        .scrollIndicators(.never)
+        .background(IslandTheme.surface1, in: Capsule())
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func capsuleTabButton(_ tab: AppTab) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { selectedTab = tab }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: tab.systemImage)
+                    .font(.system(size: 12))
+                Text(tab.rawValue)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .foregroundStyle(selectedTab == tab ? IslandTheme.text1 : IslandTheme.text3)
+            .background(selectedTab == tab ? IslandTheme.surface2 : Color.clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var memoSectionButtons: some View {
+        HStack(spacing: 6) {
+            utilityIcon(systemImage: "checklist", active: section == .tasks, help: "任务列表") {
+                section = .tasks
+            }
+            if appSettings.memoTrashEnabled {
+                utilityIcon(systemImage: "trash", active: section == .trash, help: "回收站") {
+                    section = .trash
+                }
+            }
+        }
+    }
+
+    private func utilityIcon(systemImage: String, active: Bool, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13))
+                .foregroundStyle(active ? IslandTheme.text1 : IslandTheme.text3)
+                .frame(width: 30, height: 30)
+                .background(active ? IslandTheme.surface2 : IslandTheme.surface1)
+                .clipShape(RoundedRectangle(cornerRadius: IslandTheme.radiusInput))
+                .overlay(
+                    RoundedRectangle(cornerRadius: IslandTheme.radiusInput)
+                        .stroke(IslandTheme.hairlineSoft, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var visibleTabs: [AppTab] {
+        appSettings.orderedVisibleFeatures
+            .filter { $0 != .settings }
+            .map { AppTab(feature: $0) }
     }
 
     private var completionTabBar: some View {
@@ -137,23 +368,6 @@ struct IslandView: View {
         .offset(y: -10)
     }
 
-    private func tabButton(_ tab: AppTab, systemImage: String) -> some View {
-        Button {
-            withAnimation(.easeOut(duration: 0.15)) { selectedTab = tab }
-        } label: {
-            Label(tab.rawValue, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 7)
-                .foregroundStyle(selectedTab == tab ? .white : .white.opacity(0.48))
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(selectedTab == tab ? Color.blue.opacity(0.8) : Color.clear)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
     private var addTaskArea: some View {
         HStack(spacing: 10) {
             Image(systemName: "plus.circle.fill").foregroundStyle(.blue)
@@ -161,40 +375,69 @@ struct IslandView: View {
                 .textFieldStyle(.plain)
                 .focused($titleFocused)
                 .onSubmit(addTask)
-            Button {
-                dueDate = hasDueDate ? dueDate : .now.addingTimeInterval(3600)
-                showsNewTaskDateEditor.toggle()
-            } label: {
-                Image(systemName: hasDueDate ? "clock.fill" : "clock")
-                    .foregroundStyle(hasDueDate ? Color.blue : Color.white.opacity(0.62))
-            }
-            .buttonStyle(.borderless)
-            .help("设置结束时间")
-            .popover(isPresented: $showsNewTaskDateEditor, arrowEdge: .bottom) {
-                DueDatePickerPopover(
-                    selection: $dueDate,
-                    showsClear: hasDueDate,
-                    onClear: {
-                        hasDueDate = false
-                        showsNewTaskDateEditor = false
-                    },
-                    onSave: {
-                        hasDueDate = true
-                        showsNewTaskDateEditor = false
+            if appSettings.memoCategoriesEnabled, !appSettings.memoCategories.isEmpty {
+                Button { showsCategoryPicker.toggle() } label: {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Color(hex: selectedNewTaskCategory.colorHex))
+                            .frame(width: 9, height: 9)
+                        Text(selectedNewTaskCategory.name)
+                            .font(.caption2)
+                            .lineLimit(1)
                     }
-                )
+                    .foregroundStyle(IslandTheme.text2)
+                }
+                .buttonStyle(.plain)
+                .help("选择任务分类")
+                .popover(isPresented: $showsCategoryPicker, arrowEdge: .bottom) {
+                    CategoryPickerPopover(
+                        selection: Binding(
+                            get: { selectedNewTaskCategory.id },
+                            set: { newTaskCategoryID = $0 }
+                        ),
+                        settings: appSettings,
+                        onSelect: { showsCategoryPicker = false }
+                    )
+                }
+            }
+            if appSettings.memoDueDatesEnabled {
+                Button {
+                    dueDate = hasDueDate ? dueDate : .now.addingTimeInterval(3600)
+                    showsNewTaskDateEditor.toggle()
+                } label: {
+                    Image(systemName: hasDueDate ? "clock.fill" : "clock")
+                        .foregroundStyle(hasDueDate ? Color.blue : Color.white.opacity(0.62))
+                }
+                .buttonStyle(.borderless)
+                .help("设置结束时间")
+                .popover(isPresented: $showsNewTaskDateEditor, arrowEdge: .bottom) {
+                    DueDatePickerPopover(
+                        selection: $dueDate,
+                        showsClear: hasDueDate,
+                        onClear: {
+                            hasDueDate = false
+                            showsNewTaskDateEditor = false
+                        },
+                        onSave: {
+                            hasDueDate = true
+                            showsNewTaskDateEditor = false
+                        }
+                    )
+                }
             }
 
-            Button {
-                showsPriorityPicker.toggle()
-            } label: {
-                Circle().fill(newTaskPriority.color).frame(width: 11, height: 11)
-            }
-            .buttonStyle(.plain)
-            .help("任务等级")
-            .popover(isPresented: $showsPriorityPicker, arrowEdge: .bottom) {
-                PriorityPickerPopover(selection: $newTaskPriority) {
-                    showsPriorityPicker = false
+            if appSettings.memoPrioritiesEnabled {
+                Button {
+                    showsPriorityPicker.toggle()
+                } label: {
+                    Circle().fill(appSettings.priorityColor(for: newTaskPriority)).frame(width: 11, height: 11)
+                }
+                .buttonStyle(.plain)
+                .help("任务等级")
+                .popover(isPresented: $showsPriorityPicker, arrowEdge: .bottom) {
+                    PriorityPickerPopover(selection: $newTaskPriority, settings: appSettings) {
+                        showsPriorityPicker = false
+                    }
                 }
             }
 
@@ -243,7 +486,7 @@ struct IslandView: View {
                     ScrollView {
                         LazyVStack(spacing: 8) {
                             ForEach(items) { task in
-                                TaskRow(task: task, isTrash: true, store: store)
+                                TaskRow(task: task, isTrash: true, store: store, settings: appSettings)
                             }
                         }
                     }
@@ -256,28 +499,26 @@ struct IslandView: View {
                     Text("该操作无法撤销。")
                 }
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 14) {
-                        ForEach(taskGroups) { group in
-                            VStack(alignment: .leading, spacing: 7) {
-                                Text(group.title)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.white.opacity(0.46))
-                                    .padding(.leading, 4)
-                                ForEach(group.tasks) { task in
-                                    TaskRow(task: task, isTrash: false, store: store)
-                                }
+                if appSettings.memoCategoriesEnabled, !appSettings.memoCategories.isEmpty {
+                    memoCategoryBoard
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 14) {
+                            ForEach(taskGroups(for: visibleTasks)) { group in
+                                taskGroupView(group)
                             }
                         }
                     }
+                    .scrollIndicators(.never)
                 }
-                .scrollIndicators(.never)
             }
         }
     }
 
-    private var taskGroups: [TaskGroup] {
-        let tasks = visibleTasks
+    private func taskGroups(for tasks: [TaskItem]) -> [TaskGroup] {
+        if !appSettings.memoDueDatesEnabled {
+            return tasks.isEmpty ? [] : [TaskGroup(title: "任务", tasks: tasks)]
+        }
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: .now)
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
@@ -297,6 +538,82 @@ struct IslandView: View {
         }
     }
 
+    private func taskGroupView(_ group: TaskGroup) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(group.title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.42))
+                .padding(.leading, 4)
+            ForEach(group.tasks) { task in
+                TaskRow(task: task, isTrash: false, store: store, settings: appSettings)
+            }
+        }
+    }
+
+    private var memoCategoryBoard: some View {
+        GeometryReader { geometry in
+            let categories = appSettings.memoCategories
+            let placements = MemoCategoryLayoutEngine.resolve(categories: categories)
+            let gap: CGFloat = 8
+            let cellWidth = (geometry.size.width - gap * 11) / 12
+            let cellHeight = (geometry.size.height - gap * 3) / 4
+
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(categories.enumerated()), id: \.element.id) { index, category in
+                    if placements.indices.contains(index) {
+                        let placement = placements[index]
+                        let width = cellWidth * CGFloat(placement.span.columns) + gap * CGFloat(placement.span.columns - 1)
+                        let height = cellHeight * CGFloat(placement.span.rows) + gap * CGFloat(placement.span.rows - 1)
+                        memoCategoryCard(category)
+                            .frame(width: width, height: height)
+                            .offset(
+                                x: CGFloat(placement.column) * (cellWidth + gap),
+                                y: CGFloat(placement.row) * (cellHeight + gap)
+                            )
+                    }
+                }
+            }
+        }
+    }
+
+    private func memoCategoryCard(_ category: MemoCategory) -> some View {
+        let firstID = appSettings.memoCategories.first?.id
+        let categoryTasks = visibleTasks.filter { ($0.categoryID ?? firstID) == category.id }
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Text(category.name)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(IslandTheme.text1)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text("\(categoryTasks.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(IslandTheme.text4)
+            }
+            if categoryTasks.isEmpty {
+                Text("暂无任务")
+                    .font(.caption2)
+                    .foregroundStyle(IslandTheme.text4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(taskGroups(for: categoryTasks)) { group in
+                            taskGroupView(group)
+                        }
+                    }
+                }
+                .scrollIndicators(.never)
+            }
+        }
+        .padding(10)
+        .background(IslandTheme.surface1, in: RoundedRectangle(cornerRadius: 13))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13)
+                .stroke(Color(hex: category.colorHex).opacity(0.2), lineWidth: 1)
+        )
+    }
+
     private var visibleTasks: [TaskItem] {
         store.activeTasks.filter { task in
             completionFilter == .completed ? task.isCompleted : !task.isCompleted
@@ -304,12 +621,23 @@ struct IslandView: View {
     }
 
     private func addTask() {
-        store.add(title: title, dueDate: hasDueDate ? dueDate : nil, priority: newTaskPriority)
+        store.add(
+            title: title,
+            dueDate: appSettings.memoDueDatesEnabled && hasDueDate ? dueDate : nil,
+            priority: appSettings.memoPrioritiesEnabled ? newTaskPriority : .blue,
+            categoryID: appSettings.memoCategoriesEnabled ? selectedNewTaskCategory.id : nil
+        )
         title = ""
         hasDueDate = false
         dueDate = .now.addingTimeInterval(3600)
         newTaskPriority = .blue
         titleFocused = true
+    }
+
+    private var selectedNewTaskCategory: MemoCategory {
+        appSettings.memoCategories.first(where: { $0.id == newTaskCategoryID })
+            ?? appSettings.memoCategories.first
+            ?? MemoCategory(name: "未分类", colorHex: "#0A84FF")
     }
 }
 
@@ -317,11 +645,13 @@ private struct TaskRow: View {
     let task: TaskItem
     let isTrash: Bool
     @ObservedObject var store: TaskStore
+    @ObservedObject var settings: AppSettingsStore
     @State private var isHovered = false
     @State private var isEditing = false
     @State private var editedTitle = ""
     @State private var showsDateEditor = false
     @State private var showsPriorityEditor = false
+    @State private var showsCategoryEditor = false
     @State private var showsPermanentDeleteConfirmation = false
     @State private var draftDate = Date().addingTimeInterval(3600)
     @State private var isSubtaskListExpanded = false
@@ -356,12 +686,13 @@ private struct TaskRow: View {
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2, perform: beginEditing)
                 }
-                if let due = task.dueDate {
+                if settings.memoDueDatesEnabled, let due = task.dueDate {
                     Label(due.formatted(date: .abbreviated, time: .shortened), systemImage: "clock")
                         .font(.caption2)
                         .foregroundStyle(due < .now && !task.isCompleted ? .red : .white.opacity(0.45))
                 }
-                if !isTrash, let subtasks = task.subtasks, !subtasks.isEmpty {
+                if settings.memoSubtasksEnabled,
+                   !isTrash, let subtasks = task.subtasks, !subtasks.isEmpty {
                     Button {
                         withAnimation(.easeInOut(duration: 0.16)) { isSubtaskListExpanded.toggle() }
                     } label: {
@@ -387,7 +718,8 @@ private struct TaskRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("彻底删除")
-            } else if isHovered || showsDateEditor || showsPriorityEditor {
+            } else if isHovered || showsDateEditor || showsPriorityEditor || showsCategoryEditor {
+                if settings.memoSubtasksEnabled {
                 Button {
                     let willExpand = !isSubtaskListExpanded
                     withAnimation(.easeInOut(duration: 0.16)) { isSubtaskListExpanded = willExpand }
@@ -397,12 +729,35 @@ private struct TaskRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help(isSubtaskListExpanded ? "收起子任务" : "添加或管理子任务")
+                }
 
+                if settings.memoCategoriesEnabled, settings.memoCategories.count > 1 {
+                Button { showsCategoryEditor.toggle() } label: {
+                    Circle()
+                        .fill(Color(hex: currentCategory.colorHex))
+                        .frame(width: 9, height: 9)
+                        .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("修改任务分类")
+                .popover(isPresented: $showsCategoryEditor, arrowEdge: .trailing) {
+                    CategoryPickerPopover(
+                        selection: Binding(
+                            get: { currentCategory.id },
+                            set: { store.updateCategory(task, categoryID: $0) }
+                        ),
+                        settings: settings,
+                        onSelect: { showsCategoryEditor = false }
+                    )
+                }
+                }
+
+                if settings.memoPrioritiesEnabled {
                 Button {
                     showsPriorityEditor.toggle()
                 } label: {
                     Circle()
-                        .fill((task.priority ?? .blue).color)
+                        .fill(settings.priorityColor(for: task.priority ?? .blue))
                         .frame(width: 10, height: 10)
                         .frame(width: 20, height: 20)
                         .contentShape(Rectangle())
@@ -415,10 +770,13 @@ private struct TaskRow: View {
                             get: { task.priority ?? .blue },
                             set: { store.updatePriority(task, priority: $0) }
                         ),
+                        settings: settings,
                         onSelect: { showsPriorityEditor = false }
                     )
                 }
+                }
 
+                if settings.memoDueDatesEnabled {
                 Button {
                     draftDate = task.dueDate ?? .now.addingTimeInterval(3600)
                     showsDateEditor.toggle()
@@ -428,22 +786,25 @@ private struct TaskRow: View {
                 .buttonStyle(.borderless)
                 .help("修改结束时间")
                 .popover(isPresented: $showsDateEditor, arrowEdge: .trailing) { dateEditor }
+                }
 
                 Button(role: .destructive) { store.delete(task) } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless).help("移到回收站")
             } else {
+                if settings.memoPrioritiesEnabled {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill((task.priority ?? .blue).color)
+                        .fill(settings.priorityColor(for: task.priority ?? .blue))
                         .frame(width: 8, height: 8)
-                    Text((task.priority ?? .blue).title)
+                    Text(settings.priorityName(for: task.priority ?? .blue))
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.55))
+                }
                 }
             }
             }
 
-            if isSubtaskListExpanded && !isTrash {
+            if settings.memoSubtasksEnabled && isSubtaskListExpanded && !isTrash {
                 subtaskList
                     .padding(.top, 10)
             }
@@ -463,12 +824,18 @@ private struct TaskRow: View {
         }
     }
 
+    private var currentCategory: MemoCategory {
+        settings.memoCategories.first(where: { $0.id == task.categoryID })
+            ?? settings.memoCategories.first
+            ?? MemoCategory(name: "未分类", colorHex: "#0A84FF")
+    }
+
     private var subtaskList: some View {
         VStack(spacing: 8) {
             Divider().overlay(.white.opacity(0.08))
 
             ForEach(task.subtasks ?? []) { subtask in
-                SubtaskRow(task: task, subtask: subtask, store: store)
+                SubtaskRow(task: task, subtask: subtask, store: store, settings: settings)
                     .padding(.leading, 28)
             }
 
@@ -533,6 +900,7 @@ private struct SubtaskRow: View {
     let task: TaskItem
     let subtask: SubtaskItem
     @ObservedObject var store: TaskStore
+    @ObservedObject var settings: AppSettingsStore
 
     @State private var isHovered = false
     @State private var showsDateEditor = false
@@ -552,7 +920,7 @@ private struct SubtaskRow: View {
                     .font(.callout)
                     .strikethrough(subtask.isCompleted)
                     .foregroundStyle(subtask.isCompleted ? .white.opacity(0.4) : .white.opacity(0.86))
-                if let dueDate = subtask.dueDate {
+                if settings.memoDueDatesEnabled, let dueDate = subtask.dueDate {
                     Label(dueDate.formatted(date: .abbreviated, time: .shortened), systemImage: "clock")
                         .font(.caption2)
                         .foregroundStyle(dueDate < .now && !subtask.isCompleted ? .red : .white.opacity(0.42))
@@ -561,9 +929,10 @@ private struct SubtaskRow: View {
             Spacer()
 
             if isHovered || showsDateEditor || showsPriorityEditor {
+                if settings.memoPrioritiesEnabled {
                 Button { showsPriorityEditor.toggle() } label: {
                     Circle()
-                        .fill((subtask.priority ?? .blue).color)
+                        .fill(settings.priorityColor(for: subtask.priority ?? .blue))
                         .frame(width: 9, height: 9)
                         .frame(width: 18, height: 18)
                 }
@@ -575,10 +944,13 @@ private struct SubtaskRow: View {
                             get: { subtask.priority ?? .blue },
                             set: { store.updateSubtaskPriority(in: task, subtask: subtask, priority: $0) }
                         ),
+                        settings: settings,
                         onSelect: { showsPriorityEditor = false }
                     )
                 }
+                }
 
+                if settings.memoDueDatesEnabled {
                 Button {
                     draftDate = subtask.dueDate ?? .now.addingTimeInterval(3600)
                     showsDateEditor.toggle()
@@ -601,6 +973,7 @@ private struct SubtaskRow: View {
                         }
                     )
                 }
+                }
 
                 Button(role: .destructive) {
                     store.deleteSubtask(from: task, subtask: subtask)
@@ -610,11 +983,13 @@ private struct SubtaskRow: View {
                 .buttonStyle(.borderless)
                 .help("删除子任务")
             } else {
+                if settings.memoPrioritiesEnabled {
                 HStack(spacing: 5) {
-                    Circle().fill((subtask.priority ?? .blue).color).frame(width: 7, height: 7)
-                    Text((subtask.priority ?? .blue).title)
+                    Circle().fill(settings.priorityColor(for: subtask.priority ?? .blue)).frame(width: 7, height: 7)
+                    Text(settings.priorityName(for: subtask.priority ?? .blue))
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.45))
+                }
                 }
             }
         }
@@ -632,28 +1007,9 @@ private struct TaskGroup: Identifiable {
     var id: String { title }
 }
 
-private extension TaskPriority {
-    var title: String {
-        switch self {
-        case .blue: "普通"
-        case .yellow: "一般"
-        case .orange: "重要"
-        case .red: "紧急"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .blue: .blue
-        case .yellow: .yellow
-        case .orange: .orange
-        case .red: .red
-        }
-    }
-}
-
 private struct PriorityPickerPopover: View {
     @Binding var selection: TaskPriority
+    @ObservedObject var settings: AppSettingsStore
     let onSelect: () -> Void
 
     var body: some View {
@@ -664,8 +1020,8 @@ private struct PriorityPickerPopover: View {
                     onSelect()
                 } label: {
                     HStack(spacing: 10) {
-                        Circle().fill(priority.color).frame(width: 11, height: 11)
-                        Text(priority.title)
+                        Circle().fill(settings.priorityColor(for: priority)).frame(width: 11, height: 11)
+                        Text(settings.priorityName(for: priority))
                         Spacer()
                         if selection == priority {
                             Image(systemName: "checkmark").foregroundStyle(.secondary)
@@ -680,6 +1036,38 @@ private struct PriorityPickerPopover: View {
         }
         .padding(8)
         .frame(width: 150)
+    }
+}
+
+private struct CategoryPickerPopover: View {
+    @Binding var selection: String
+    @ObservedObject var settings: AppSettingsStore
+    let onSelect: () -> Void
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ForEach(settings.memoCategories) { category in
+                Button {
+                    selection = category.id
+                    onSelect()
+                } label: {
+                    HStack(spacing: 9) {
+                        Circle().fill(Color(hex: category.colorHex)).frame(width: 10, height: 10)
+                        Text(category.name).lineLimit(1)
+                        Spacer()
+                        if selection == category.id {
+                            Image(systemName: "checkmark").foregroundStyle(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(8)
+        .frame(width: 180)
     }
 }
 

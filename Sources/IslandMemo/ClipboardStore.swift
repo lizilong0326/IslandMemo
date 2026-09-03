@@ -56,13 +56,17 @@ final class ClipboardStore: ObservableObject {
         lastChangeCount = pasteboard.changeCount
         let source = NSWorkspace.shared.frontmostApplication?.localizedName
 
+        let defaults = UserDefaults.standard
+        let capturesText = defaults.object(forKey: "clipboard-capture-text") as? Bool ?? true
+        let capturesImages = defaults.object(forKey: "clipboard-capture-images") as? Bool ?? true
+
         // Finder supplies both the actual file URL and a TIFF document-icon preview.
         // Resolve the file first so the history stores the real photo, not its icon.
-        if let imageData = imageFileDataFromPasteboard() {
+        if capturesImages, let imageData = imageFileDataFromPasteboard() {
             recordImage(imageData, source: source)
-        } else if let imageData = imageDataFromAvailableTypes() {
+        } else if capturesImages, let imageData = imageDataFromAvailableTypes() {
             recordImage(imageData, source: source)
-        } else if let imageURL = imageURLFromMarkup() {
+        } else if capturesImages, let imageURL = imageURLFromMarkup() {
             Task { [weak self] in
                 guard let self,
                       let (data, _) = try? await URLSession.shared.data(from: imageURL),
@@ -72,7 +76,7 @@ final class ClipboardStore: ObservableObject {
                 }
                 self.recordImage(png, source: source)
             }
-        } else if let text = pasteboard.string(forType: .string), !text.isEmpty {
+        } else if capturesText, let text = pasteboard.string(forType: .string), !text.isEmpty {
             recordText(text, source: source)
         } else {
             writeUnhandledTypeDiagnostics(source: source)
@@ -227,7 +231,9 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func trimAndSave() {
-        while entries.count > 20 {
+        let savedLimit = UserDefaults.standard.integer(forKey: "clipboard-max-items")
+        let limit = savedLimit > 0 ? min(max(savedLimit, 5), 100) : 20
+        while entries.count > limit {
             let removed = entries.removeLast()
             deleteCachedImage(for: removed)
         }
@@ -243,11 +249,15 @@ final class ClipboardStore: ObservableObject {
         guard let data = try? Data(contentsOf: metadataURL) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        entries = (try? decoder.decode([ClipboardEntry].self, from: data)) ?? []
-        entries = Array(entries.prefix(20)).filter { entry in
+        entries = ((try? decoder.decode([ClipboardEntry].self, from: data)) ?? []).filter { entry in
             guard entry.kind == .image, let fileName = entry.imageFileName else { return true }
             return FileManager.default.fileExists(atPath: imageFolderURL.appendingPathComponent(fileName).path)
         }
+        trimAndSave()
+    }
+
+    func applyPreferences() {
+        trimAndSave()
     }
 
     private func save() {
