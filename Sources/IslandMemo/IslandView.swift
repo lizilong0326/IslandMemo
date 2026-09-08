@@ -1263,7 +1263,7 @@ private struct WideCalendarPicker: View {
     }
 }
 
-private struct BottomRoundedRectangle: Shape {
+struct BottomRoundedRectangle: Shape {
     let radius: CGFloat
 
     func path(in rect: CGRect) -> Path {

@@ -46,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appSettings.onClipboardConfigurationChanged = { [weak clipboardStore] in
             clipboardStore?.applyPreferences()
         }
+        appSettings.onPanelSizeChanged = { [weak self] in
+            self?.updateVisiblePanelSize()
+        }
         setupPanel()
         setupMenuBar()
         setupGlobalHotKey()
@@ -74,12 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             contentRect: NSRect(
                 x: 0,
                 y: 0,
-                width: IslandTheme.panelWidth,
-                height: panelMetrics.topInset
-                    + IslandTheme.topbarHeight
-                    + IslandTheme.s3
-                    + IslandTheme.panelContentHeight
-                    + IslandTheme.s4
+                width: CGFloat(appSettings.panelWidth),
+                height: panelMetrics.topInset + CGFloat(appSettings.panelHeight)
             ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -213,10 +212,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screen.frame.maxY - screen.visibleFrame.maxY
         )
         panelMetrics.topInset = menuBarHeight + 4
+        let topInset = menuBarHeight + 4
         let size = NSSize(
-            width: min(IslandTheme.panelWidth, screen.frame.width - 24),
-            height: menuBarHeight + 4 + IslandTheme.topbarHeight + IslandTheme.s3
-                + IslandTheme.panelContentHeight + IslandTheme.s4
+            width: min(CGFloat(appSettings.panelWidth), max(320, screen.frame.width - 24)),
+            height: topInset + min(
+                CGFloat(appSettings.panelHeight),
+                max(240, screen.frame.height - topInset - 12)
+            )
         )
         let x = screen.frame.midX - size.width / 2
         let expandedY = screen.frame.maxY - size.height
@@ -227,7 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.isVisible && !isAnimatingOut {
             if abs(panel.frame.origin.x - targetFrame.origin.x) > 0.5
                 || abs(panel.frame.origin.y - targetFrame.origin.y) > 0.5
-                || abs(panel.frame.width - targetFrame.width) > 0.5 {
+                || abs(panel.frame.width - targetFrame.width) > 0.5
+                || abs(panel.frame.height - targetFrame.height) > 0.5 {
                 panel.setFrame(targetFrame, display: true)
             }
             return
@@ -254,6 +257,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.checkPointer()
             }
         }
+    }
+
+    private func updateVisiblePanelSize() {
+        guard panel != nil, panel.isVisible, !isAnimatingOut,
+              let screen = panel.screen ?? screenContainingMouse() ?? NSScreen.main else { return }
+        showPanel(on: screen)
     }
 
     private func hidePanel(on screen: NSScreen) {

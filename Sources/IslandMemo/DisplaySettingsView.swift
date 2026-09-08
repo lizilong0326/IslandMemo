@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 private enum SettingsPane: String, CaseIterable, Identifiable {
+    case display = "显示"
     case features = "功能与顺序"
     case memo = "备忘录"
     case clipboard = "复制记录"
@@ -17,6 +18,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     var id: Self { self }
     var icon: String {
         switch self {
+        case .display: return "rectangle.inset.filled"
         case .features: return "rectangle.3.group"
         case .memo: return "checklist"
         case .clipboard: return "doc.on.clipboard"
@@ -113,6 +115,7 @@ struct DisplaySettingsView: View {
 
     @ViewBuilder private var editor: some View {
         switch pane {
+        case .display: displayEditor
         case .features: featureEditor
         case .memo: memoEditor
         case .clipboard: clipboardEditor
@@ -124,6 +127,45 @@ struct DisplaySettingsView: View {
         case .links: linksEditor
         case .credentials: credentialsEditor
         case .general: generalEditor
+        }
+    }
+
+    private var displayEditor: some View {
+        scrollEditor("显示", detail: "调整灵动面板尺寸，修改会同步到右侧预览并自动保存") {
+            settingsCard {
+                panelDimensionControl(
+                    "面板宽度",
+                    detail: "较宽时可容纳更多顶部功能",
+                    value: $settings.panelWidth,
+                    range: AppSettingsStore.panelWidthRange
+                )
+                panelDimensionControl(
+                    "面板高度",
+                    detail: "不包含不同屏幕的菜单栏与刘海避让区域",
+                    value: $settings.panelHeight,
+                    range: AppSettingsStore.panelHeightRange
+                )
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "display")
+                    .foregroundStyle(IslandTheme.accentBlue)
+                Text("当前尺寸：\(Int(settings.panelWidth.rounded())) × \(Int(settings.panelHeight.rounded())) pt")
+                    .font(.caption)
+                    .foregroundStyle(IslandTheme.text3)
+                Spacer()
+                Button {
+                    settings.resetPanelSize()
+                } label: {
+                    Label("恢复默认", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+            }
+            .padding(.horizontal, 4)
+            Text("当设定尺寸超过当前屏幕可用范围时，实际显示会自动缩小以保证面板完整可见。")
+                .font(.caption2)
+                .foregroundStyle(IslandTheme.text4)
+                .padding(.horizontal, 4)
         }
     }
 
@@ -815,6 +857,29 @@ struct DisplaySettingsView: View {
         .padding(.vertical, 11).settingDivider()
     }
 
+    private func panelDimensionControl(
+        _ title: String,
+        detail: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(IslandTheme.text1)
+                    Text(detail).font(.caption2).foregroundStyle(IslandTheme.text3)
+                }
+                Spacer(minLength: 12)
+                Text("\(Int(value.wrappedValue.rounded())) pt")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(IslandTheme.text2)
+            }
+            Slider(value: value, in: range, step: 4)
+        }
+        .padding(.vertical, 12)
+        .settingDivider()
+    }
+
     private func infoRow(_ title: String, value: String) -> some View {
         HStack {
             Text(title).foregroundStyle(IslandTheme.text1)
@@ -901,11 +966,8 @@ private struct SettingsReadOnlyPreview: View {
             }
 
             GeometryReader { geometry in
-                let logicalWidth = IslandTheme.panelWidth
-                let logicalHeight = IslandTheme.topbarHeight
-                    + IslandTheme.s3
-                    + IslandTheme.panelContentHeight
-                    + IslandTheme.s4
+                let logicalWidth = CGFloat(settings.panelWidth)
+                let logicalHeight = CGFloat(settings.panelHeight)
                 let scale = min(
                     geometry.size.width / logicalWidth,
                     geometry.size.height / logicalHeight
@@ -926,40 +988,74 @@ private struct SettingsReadOnlyPreview: View {
             previewTopbar
                 .frame(height: IslandTheme.topbarHeight)
             Group {
-                if pane == .home || pane == .focus { homePreview } else { detailPreview }
+                if pane == .display || pane == .home || pane == .focus { homePreview } else { detailPreview }
             }
-            .frame(height: IslandTheme.panelContentHeight)
+            .frame(height: max(
+                0,
+                CGFloat(settings.panelHeight) - IslandTheme.topbarHeight - IslandTheme.s3 - IslandTheme.s4
+            ))
         }
         .padding(.horizontal, IslandTheme.s6)
         .padding(.bottom, IslandTheme.s4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(IslandTheme.hairline, lineWidth: 1))
+        .background {
+            BottomRoundedRectangle(radius: IslandTheme.radiusPanel)
+                .fill(IslandTheme.background)
+        }
+        .overlay {
+            BottomRoundedRectangle(radius: IslandTheme.radiusPanel)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.purple.opacity(0.35),
+                            IslandTheme.accentBlue.opacity(0.22),
+                            IslandTheme.accentGreen.opacity(0.28),
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    lineWidth: 1
+                )
+        }
     }
 
     private var previewTopbar: some View {
-        HStack(spacing: 4) {
-            ForEach(settings.orderedVisibleFeatures.filter { $0 != .settings }) { feature in
-                HStack(spacing: 4) {
-                    Image(systemName: feature.systemImage).font(.system(size: 12))
-                    Text(feature.rawValue).font(.system(size: 12, weight: .medium))
+        HStack(spacing: IslandTheme.s3) {
+            ScrollView(.horizontal) {
+                HStack(spacing: IslandTheme.s1) {
+                    ForEach(settings.orderedVisibleFeatures.filter { $0 != .settings }) { feature in
+                        HStack(spacing: 5) {
+                            Image(systemName: feature.systemImage).font(.system(size: 12))
+                            Text(feature.rawValue).font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(IslandTheme.text2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(IslandTheme.surface2, in: Capsule())
+                    }
                 }
-                .foregroundStyle(IslandTheme.text2)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(IslandTheme.surface2, in: Capsule())
+                .padding(3)
             }
-            Spacer(minLength: 0)
+            .scrollIndicators(.never)
+            .background(IslandTheme.surface1, in: Capsule())
+            .frame(maxWidth: .infinity, alignment: .leading)
             Image(systemName: "gearshape")
-                .font(.system(size: 12))
+                .font(.system(size: 13))
                 .foregroundStyle(IslandTheme.text3)
-                .padding(7)
-                .background(IslandTheme.surface2, in: RoundedRectangle(cornerRadius: 8))
+                .frame(width: 30, height: 30)
+                .background(IslandTheme.surface1)
+                .clipShape(RoundedRectangle(cornerRadius: IslandTheme.radiusInput))
+                .overlay(
+                    RoundedRectangle(cornerRadius: IslandTheme.radiusInput)
+                        .stroke(IslandTheme.hairlineSoft, lineWidth: 1)
+                )
         }
         .frame(height: IslandTheme.topbarHeight).clipped()
     }
 
     @ViewBuilder private var detailPreview: some View {
         switch pane {
+        case .display: EmptyView()
         case .features, .memo: memoPreview
         case .clipboard: clipboardPreview
         case .focus: focusPreview

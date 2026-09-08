@@ -27,6 +27,10 @@ struct MemoCategory: Identifiable, Codable, Equatable, Sendable {
 @MainActor
 final class AppSettingsStore: ObservableObject {
     static let maximumHomeModuleCount = 6
+    static let defaultPanelWidth = 868.0
+    static let defaultPanelHeight = 413.0
+    static let panelWidthRange = 720.0...1200.0
+    static let panelHeightRange = 360.0...720.0
     enum ClockStyle: String, CaseIterable, Identifiable, Sendable {
         case digital
         case analog
@@ -283,6 +287,20 @@ final class AppSettingsStore: ObservableObject {
     @Published private(set) var shortcutDisplayText: String
     var canDisableHomeModule: ((HomeModule) -> Bool)?
     var onClipboardConfigurationChanged: (() -> Void)?
+    var onPanelSizeChanged: (() -> Void)?
+
+    @Published var panelWidth: Double {
+        didSet {
+            UserDefaults.standard.set(panelWidth, forKey: "panel-width")
+            onPanelSizeChanged?()
+        }
+    }
+    @Published var panelHeight: Double {
+        didSet {
+            UserDefaults.standard.set(panelHeight, forKey: "panel-height")
+            onPanelSizeChanged?()
+        }
+    }
 
     @Published var memoSubtasksEnabled: Bool {
         didSet { UserDefaults.standard.set(memoSubtasksEnabled, forKey: "memo-subtasks-enabled") }
@@ -435,6 +453,16 @@ final class AppSettingsStore: ObservableObject {
         enabledFeatures = features
         enabledHomeModules = homeModules
         homeLayoutReadOnly = storedSizeIsInvalid
+        let savedPanelWidth = defaults.double(forKey: "panel-width")
+        panelWidth = Self.clamp(
+            savedPanelWidth > 0 ? savedPanelWidth : Self.defaultPanelWidth,
+            to: Self.panelWidthRange
+        )
+        let savedPanelHeight = defaults.double(forKey: "panel-height")
+        panelHeight = Self.clamp(
+            savedPanelHeight > 0 ? savedPanelHeight : Self.defaultPanelHeight,
+            to: Self.panelHeightRange
+        )
         memoSubtasksEnabled = defaults.object(forKey: "memo-subtasks-enabled") as? Bool ?? true
         memoDueDatesEnabled = defaults.object(forKey: "memo-due-dates-enabled") as? Bool ?? true
         memoPrioritiesEnabled = defaults.object(forKey: "memo-priorities-enabled") as? Bool ?? true
@@ -574,9 +602,18 @@ final class AppSettingsStore: ObservableObject {
         shortcutDisplayText = text
     }
 
+    func resetPanelSize() {
+        panelWidth = Self.defaultPanelWidth
+        panelHeight = Self.defaultPanelHeight
+    }
+
     func priorityName(for priority: TaskPriority) -> String {
         let value = priorityNames[priority]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? Self.defaultPriorityName(priority) : value
+    }
+
+    private static func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
     }
 
     func priorityColorHex(for priority: TaskPriority) -> String {
