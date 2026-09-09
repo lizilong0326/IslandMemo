@@ -19,6 +19,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let aiApplicationDetector = AIApplicationDetector()
     private let appSettings = AppSettingsStore()
     private let panelMetrics = PanelMetrics()
+    private lazy var memoCapture = MemoCaptureController(store: store, settings: appSettings) { [weak self] in
+        self?.openDisplaySettings()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .openMemoAISettings, object: nil)
+        }
+    }
     private lazy var reminderScheduler = TaskReminderScheduler { [weak self] in
         self?.store.tasks ?? []
     }
@@ -40,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        ApplicationMenus.install()
         appSettings.canDisableHomeModule = { [weak recordingsStore] module in
             (module != .recorder && module != .recordings) || recordingsStore?.state == .idle
         }
@@ -62,9 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startPointerTracking()
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openFromMenu()
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         pointerTrackingTimer?.invalidate()
         reminderScheduler.stop()
+        memoCapture.close()
         notifyServer.stop()
         codexStatusStore.stop()
         globalHotKey?.invalidate()
@@ -98,7 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             codexStatusStore: codexStatusStore,
             appSettings: appSettings,
             panelMetrics: panelMetrics,
-            onOpenDisplaySettings: { [weak self] in self?.openSettingsFromPanel() }
+            onOpenDisplaySettings: { [weak self] in self?.openSettingsFromPanel() },
+            onGenerateMemo: { [weak self] text, source in
+                self?.memoCapture.begin(text: text, source: source)
+            }
         ))
         hostingView.wantsLayer = true
         hostingView.autoresizingMask = [.width, .height]

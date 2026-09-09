@@ -7,3 +7,8 @@ xcuserdata/
 DerivedData/
 CodexFloat/
 TO-DO-Panel/
+
+# Local model credentials, including accidental copies and atomic-write staging files.
+memo-ai-credentials.json
+memo-ai-credentials.json.*
+.memo-ai-credentials-*.tmp

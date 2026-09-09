@@ -9,6 +9,7 @@ final class TaskStore: ObservableObject {
     @Published private(set) var resetMemoListRequest = 0
 
     private let repository: any TaskRepository
+    private var persistenceTask: Task<Bool, Never>?
 
     init(repository: any TaskRepository) {
         self.repository = repository
@@ -39,15 +40,27 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    func add(title: String, dueDate: Date?, priority: TaskPriority = .blue, categoryID: String? = nil) {
+    @discardableResult
+    func add(title: String, dueDate: Date?, priority: TaskPriority = .blue, categoryID: String? = nil, preserveWhitespace: Bool = false) -> UUID? {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-        tasks.append(TaskItem(title: cleaned, dueDate: dueDate, priority: priority, categoryID: categoryID))
+        guard !cleaned.isEmpty else { return nil }
+        let task = TaskItem(title: preserveWhitespace ? title : cleaned, dueDate: dueDate, priority: priority, categoryID: categoryID)
+        tasks.append(task)
         persist()
+        return task.id
     }
 
     func requestAddFocus() {
         focusAddRequest += 1
+    }
+
+    func updateMemo(id: UUID, title: String, dueDate: Date?, priority: TaskPriority? = nil, preserveWhitespace: Bool = false) {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[index].title = preserveWhitespace ? title : cleaned
+        tasks[index].dueDate = dueDate
+        if let priority { tasks[index].priority = priority }
+        persist()
     }
 
     func requestMemoListReset() {
@@ -144,11 +157,28 @@ final class TaskStore: ObservableObject {
         persist()
     }
 
+    func awaitPendingSave() async -> Bool {
+        await persistenceTask?.value ?? true
+    }
+
+    func retryPendingSave() async -> Bool {
+        persist()
+        return await awaitPendingSave()
+    }
+
     private func persist() {
         let snapshot = tasks
-        Task {
-            do { try await repository.save(snapshot) }
-            catch { errorMessage = "保存任务失败：\(error.localizedDescription)" }
+        let previous = persistenceTask
+        persistenceTask = Task {
+            _ = await previous?.value
+            do {
+                try await repository.save(snapshot)
+                errorMessage = nil
+                return true
+            } catch {
+                errorMessage = "保存任务失败：\(error.localizedDescription)"
+                return false
+            }
         }
     }
 }

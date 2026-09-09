@@ -289,6 +289,7 @@ final class AppSettingsStore: ObservableObject {
     var onClipboardConfigurationChanged: (() -> Void)?
     var onPanelSizeChanged: (() -> Void)?
 
+
     @Published var panelWidth: Double {
         didSet {
             UserDefaults.standard.set(panelWidth, forKey: "panel-width")

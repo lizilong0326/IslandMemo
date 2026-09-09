@@ -3,6 +3,7 @@ import SwiftUI
 struct ClipboardHistoryView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var settings: AppSettingsStore
+    let onGenerateMemo: (String, String) -> Void
 
     var body: some View {
         Group {
@@ -63,6 +64,16 @@ struct ClipboardHistoryView: View {
                         .lineLimit(1)
                 }
                 Spacer()
+                if entry.kind == .text, let text = entry.text,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button { onGenerateMemo(text, entry.sourceApplication ?? "复制记录") } label: {
+                        Image(systemName: "note.text.badge.plus")
+                    }
+                    .help("添加备忘录：编辑原文，可手动推理")
+                    .accessibilityLabel("添加备忘录")
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                }
                 Button { store.copy(entry) } label: {
                     Label("复制", systemImage: "doc.on.doc")
                 }

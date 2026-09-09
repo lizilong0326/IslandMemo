@@ -70,6 +70,9 @@ struct DisplaySettingsView: View {
         .frame(minWidth: 1060, minHeight: 650)
         .preferredColorScheme(.dark)
         .tint(IslandTheme.accentBlue)
+        .onReceive(NotificationCenter.default.publisher(for: .openMemoAISettings)) { _ in
+            pane = .clipboard
+        }
         .alert("提示", isPresented: Binding(
             get: { settings.settingsError != nil },
             set: { if !$0 { settings.settingsError = nil } }
@@ -349,6 +352,9 @@ struct DisplaySettingsView: View {
 
     private var clipboardEditor: some View {
         scrollEditor("复制记录", detail: "设置记录类型、容量和卡片展示") {
+            settingsCard {
+                MemoAISettingsView()
+            }
             settingsCard {
                 settingsToggle("记录文字", detail: "监听复制到剪贴板的文字", value: $settings.clipboardCaptureText)
                 settingsToggle("记录图片", detail: "包含截图和复制的图片文件", value: $settings.clipboardCaptureImages)

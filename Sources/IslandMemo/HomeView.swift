@@ -297,6 +297,7 @@ struct HomeView: View {
     @ObservedObject var codexStatus: CodexStatusStore
     @ObservedObject var panelMetrics: PanelMetrics
     @ObservedObject var settings: AppSettingsStore
+    let onGenerateMemo: (String, String) -> Void
     var standaloneModule: AppSettingsStore.HomeModule? = nil
 
     @State private var now = Date()
@@ -507,17 +508,28 @@ struct HomeView: View {
                 Text("复制内容后会出现在这里").font(.caption).foregroundStyle(IslandTheme.text4)
             } else {
                 ForEach(items) { entry in
-                    Button { clipboard.copy(entry) } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: entry.kind == .image ? "photo" : "doc.text")
-                                .foregroundStyle(IslandTheme.text3)
-                            Text(entry.kind == .image ? "图片" : (entry.text ?? ""))
-                                .lineLimit(1).foregroundStyle(IslandTheme.text2)
-                            Spacer()
-                            Image(systemName: "doc.on.doc").foregroundStyle(IslandTheme.text4)
+                    HStack(spacing: 7) {
+                        Button { clipboard.copy(entry) } label: {
+                            HStack(spacing: 7) {
+                                Image(systemName: entry.kind == .image ? "photo" : "doc.text")
+                                    .foregroundStyle(IslandTheme.text3)
+                                Text(entry.kind == .image ? "图片" : (entry.text ?? ""))
+                                    .lineLimit(1).foregroundStyle(IslandTheme.text2)
+                                Spacer()
+                                Image(systemName: "doc.on.doc").foregroundStyle(IslandTheme.text4)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        if entry.kind == .text, let text = entry.text,
+                           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Button { onGenerateMemo(text, entry.sourceApplication ?? "复制记录") } label: {
+                                Image(systemName: "note.text.badge.plus").foregroundStyle(IslandTheme.accentBlue)
+                            }
+                            .buttonStyle(.plain)
+                            .help("添加备忘录：编辑原文，可手动推理")
+                            .accessibilityLabel("添加备忘录")
                         }
                     }
-                    .buttonStyle(.plain)
                 }
             }
             Spacer(minLength: 0)
