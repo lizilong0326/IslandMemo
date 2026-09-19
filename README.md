@@ -1,6 +1,7 @@
-![丫丫灵动 Logo](assets/app-icon.png)
-
-# 丫丫灵动（IslandMemo）
+<div align="center">
+  <img src="assets/app-icon.png" width="160" alt="丫丫灵动 Logo">
+  <h1>丫丫灵动（IslandMemo）</h1>
+</div>
 
 把 Mac 刘海变成一个随手可用的本地工作台。单击屏幕顶部中央区域，或使用自定义全局快捷键，即可快速打开备忘录、剪贴板、日历、AI 任务和专注工具。
 
