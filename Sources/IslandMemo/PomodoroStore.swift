@@ -17,14 +17,23 @@ final class PomodoroStore: ObservableObject {
     @Published var durationMinutes: Int {
         didSet { UserDefaults.standard.set(durationMinutes, forKey: Self.durationDefaultsKey) }
     }
+    @Published var soundEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(soundEnabled, forKey: Self.soundDefaultsKey)
+            if !soundEnabled { tickSound.stop() }
+        }
+    }
 
     private static let durationDefaultsKey = "pomodoro-duration-minutes"
+    private static let soundDefaultsKey = "pomodoro-tick-sound-enabled"
     private var endDate: Date?
     private var timer: Timer?
+    private let tickSound = PomodoroTickSound()
 
     init() {
         let saved = UserDefaults.standard.integer(forKey: Self.durationDefaultsKey)
         durationMinutes = saved > 0 ? min(saved, 180) : 25
+        soundEnabled = UserDefaults.standard.object(forKey: Self.soundDefaultsKey) as? Bool ?? true
         remainingSeconds = durationMinutes * 60
     }
 
@@ -55,14 +64,18 @@ final class PomodoroStore: ObservableObject {
 
     func pause() {
         guard phase == .running else { return }
-        tick()
+        tick(playSound: false)
+        guard phase == .running else { return }
         phase = .paused
         stopTimer()
+        tickSound.stop()
     }
 
     func reset() {
         phase = .idle
         stopTimer()
+        tickSound.stop()
+        endDate = nil
         remainingSeconds = durationMinutes * 60
     }
 
@@ -81,15 +94,20 @@ final class PomodoroStore: ObservableObject {
         timer = nil
     }
 
-    private func tick() {
+    private func tick(playSound: Bool = true) {
         guard phase == .running, let endDate else { return }
-        let remaining = Int(endDate.timeIntervalSinceNow.rounded())
+        let remaining = Int(ceil(endDate.timeIntervalSinceNow))
         if remaining > 0 {
+            if remaining < remainingSeconds, playSound, soundEnabled {
+                tickSound.play()
+            }
             remainingSeconds = remaining
             return
         }
         phase = .idle
         stopTimer()
+        tickSound.stop()
+        self.endDate = nil
         remainingSeconds = durationMinutes * 60
         sendCompletionNotification()
     }

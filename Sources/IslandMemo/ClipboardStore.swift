@@ -13,8 +13,8 @@ final class ClipboardStore: ObservableObject {
     private var lastChangeCount: Int
     private var monitorTimer: Timer?
 
-    init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(dataDirectory: URL? = nil) {
+        let base = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("IslandMemo", isDirectory: true)
         imageFolderURL = base.appendingPathComponent("ClipboardImages", isDirectory: true)
         metadataURL = base.appendingPathComponent("clipboard-history.json")

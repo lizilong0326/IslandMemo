@@ -1095,6 +1095,8 @@ struct HomeView: View {
                 .buttonStyle(.borderless)
                 .help("重置")
 
+                pomodoroSoundButton
+
                 Spacer()
 
                 Picker("", selection: $pomodoro.durationMinutes) {
@@ -1116,6 +1118,17 @@ struct HomeView: View {
 
     private var pomodoroDurationOptions: [Int] {
         Array(Set([5, 15, 25, 45, 60, pomodoro.durationMinutes])).sorted()
+    }
+
+    private var pomodoroSoundButton: some View {
+        Button {
+            pomodoro.soundEnabled.toggle()
+        } label: {
+            Image(systemName: pomodoro.soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(pomodoro.soundEnabled ? "关闭倒计时声音" : "开启倒计时声音")
+        .help(pomodoro.soundEnabled ? "关闭倒计时声音" : "开启倒计时声音")
     }
 
     // MARK: - 音乐

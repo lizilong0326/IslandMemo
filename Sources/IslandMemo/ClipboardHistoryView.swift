@@ -16,21 +16,29 @@ struct ClipboardHistoryView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    HStack(alignment: .top, spacing: 10) {
-                        LazyVStack(spacing: 10) {
-                            ForEach(Array(store.entries.enumerated()).filter { $0.offset.isMultiple(of: 2) }, id: \.element.id) { _, entry in
-                                clipboardRow(entry)
+                GeometryReader { geometry in
+                    let columnWidth = max(0, (geometry.size.width - 10) / 2)
+                    ScrollView {
+                        // History is capped at 100 entries. Eager columns keep their
+                        // full height stable while scrolling; two sibling lazy stacks
+                        // can repeatedly invalidate each other's estimated geometry.
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(spacing: 10) {
+                                ForEach(Array(store.entries.enumerated()).filter { $0.offset.isMultiple(of: 2) }, id: \.element.id) { _, entry in
+                                    clipboardRow(entry)
+                                }
                             }
-                        }
-                        LazyVStack(spacing: 10) {
-                            ForEach(Array(store.entries.enumerated()).filter { !$0.offset.isMultiple(of: 2) }, id: \.element.id) { _, entry in
-                                clipboardRow(entry)
+                            .frame(width: columnWidth)
+                            VStack(spacing: 10) {
+                                ForEach(Array(store.entries.enumerated()).filter { !$0.offset.isMultiple(of: 2) }, id: \.element.id) { _, entry in
+                                    clipboardRow(entry)
+                                }
                             }
+                            .frame(width: columnWidth)
                         }
                     }
+                    .scrollIndicators(.never)
                 }
-                .scrollIndicators(.never)
             }
         }
     }

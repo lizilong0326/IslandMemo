@@ -471,6 +471,11 @@ struct DisplaySettingsView: View {
                             .font(.caption2)
                             .foregroundStyle(IslandTheme.text4)
                     }
+                    Divider().overlay(IslandTheme.hairline)
+                    Toggle("倒计时滴答声", isOn: $pomodoro.soundEnabled)
+                    Text("运行时每秒轻响一次；暂停、重置后停止")
+                        .font(.caption2)
+                        .foregroundStyle(IslandTheme.text4)
                 }
                 .padding(.vertical, 12)
             }
