@@ -285,7 +285,7 @@ struct DisplaySettingsView: View {
                 settingsToggle(
                     "桌面悬浮球",
                     detail: settings.canEnableMemoFloating
-                        ? "点击展开备忘录小窗口；备忘录设为隐藏时会自动关闭"
+                        ? "展开备忘录小窗口；备忘录设为隐藏时会自动关闭"
                         : "请先在“功能与顺序”中将备忘录设为“顶部”或“首页”",
                     value: Binding(get: { settings.memoFloatingEnabled },
                                    set: { settings.setMemoFloatingEnabled($0) }),
@@ -298,6 +298,23 @@ struct DisplaySettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 10)
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("展开方式").font(.caption.weight(.semibold))
+                    Picker("展开方式", selection: $settings.memoFloatingTrigger) {
+                        ForEach(AppSettingsStore.MemoFloatingTrigger.allCases) { trigger in
+                            Text(trigger.label).tag(trigger)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .disabled(!settings.memoFloatingEnabled || !settings.canEnableMemoFloating)
+                    Text(settings.memoFloatingTrigger == .hover
+                         ? "移入悬浮球立即展开，移出窗口及其弹出编辑器后原位收起；也可点击收起"
+                         : "点击悬浮球展开，点击收起按钮、Esc 或窗口外部收起；移出不自动收起")
+                        .font(.caption2).foregroundStyle(IslandTheme.text3)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 12)
             }
             settingsCard {
                 settingsToggle("任务分类", detail: "最多 4 个分类，可调整顺序和占位大小", value: $settings.memoCategoriesEnabled)
@@ -1113,7 +1130,7 @@ private struct SettingsReadOnlyPreview: View {
                         Text(settings.memoFloatingEnabled ? "桌面悬浮球已开启" : "桌面悬浮球未开启")
                             .font(.caption.weight(.semibold)).foregroundStyle(IslandTheme.text1)
                         Text(settings.canEnableMemoFloating
-                             ? "外观示例；数字代表未完成任务数量"
+                             ? "\(settings.memoFloatingTrigger.label) · 数字代表未完成任务数量"
                              : "备忘录设为顶部或首页后即可开启")
                             .font(.caption2).foregroundStyle(IslandTheme.text3)
                     }

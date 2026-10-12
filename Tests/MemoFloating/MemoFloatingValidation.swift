@@ -6,6 +6,11 @@ private actor FixtureRepository: TaskRepository {
     func save(_ tasks: [TaskItem]) async throws {}
 }
 
+@MainActor
+private final class FixturePointer {
+    var location = NSPoint(x: -100000, y: -100000)
+}
+
 @main
 struct MemoFloatingValidation {
     @MainActor static func main() {
@@ -35,7 +40,8 @@ struct MemoFloatingValidation {
             "memo-subtasks-enabled": true,
             "memo-completed-enabled": true,
             "memo-trash-enabled": true,
-            "memo-floating-enabled": false
+            "memo-floating-enabled": false,
+            "memo-floating-trigger": "click"
         ]
         for feature in AppSettingsStore.Feature.movableCases
             where feature != .memo && feature != .clipboard && feature != .clock {
@@ -49,11 +55,14 @@ struct MemoFloatingValidation {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let settings = AppSettingsStore()
         let store = TaskStore(repository: FixtureRepository())
-        let controller = MemoFloatingController(store: store, settings: settings, defaults: defaults)
+        let pointer = FixturePointer()
+        let controller = MemoFloatingController(store: store, settings: settings, defaults: defaults,
+                                                mouseLocation: { pointer.location })
         defer { controller.stop() }
         controller.start()
         await settle()
         precondition(settings.canEnableMemoFloating && !settings.memoFloatingEnabled)
+        precondition(settings.memoFloatingTrigger == .click, "Existing users retain click activation")
         precondition(controller.orbPanel == nil, "Default-off setting must not create a desktop entry")
         settings.setWorkspacePlacement(.memo, placement: .home)
         await settle()
@@ -123,10 +132,135 @@ struct MemoFloatingValidation {
                 precondition(area.contains(result), "Window is outside the visible display")
             }
         }
+        let originalAnchor = orb.frame
         memo.setFrameOrigin(NSPoint(x: memo.frame.minX - 40, y: memo.frame.minY + 15))
         controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: memo))
         controller.collapse()
+        precondition(orb.frame == originalAnchor, "Moving the memo editor must not move its orb anchor")
+
+        // Screen clamping and repeated cycles must never derive the anchor from the editor's corner.
+        let area = NSScreen.main!.visibleFrame
+        let side = orb.frame.width
+        for origin in [NSPoint(x: area.minX + 12, y: area.minY + 12),
+                       NSPoint(x: area.maxX - side - 12, y: area.minY + 12),
+                       NSPoint(x: area.minX + 12, y: area.maxY - side - 12),
+                       NSPoint(x: area.maxX - side - 12, y: area.maxY - side - 12),
+                       NSPoint(x: area.midX, y: area.midY)] {
+            orb.setFrameOrigin(origin)
+            controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: orb))
+            let anchor = orb.frame
+            for _ in 0..<3 {
+                controller.expand()
+                precondition(screenContains(memo.frame))
+                let editorFrame = memo.frame
+                controller.expand()
+                precondition(memo.frame == editorFrame, "Repeated activation must not reposition an open editor")
+                controller.collapse()
+                precondition(orb.frame == anchor, "Collapse must restore the original orb position at every edge")
+            }
+        }
+        orb.setFrameOrigin(originalAnchor.origin)
+        controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: orb))
         let savedFrame = orb.frame
+
+        // Use native tracking callbacks with an injected pointer, without moving the user's mouse.
+        let entered = NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: orb.windowNumber, context: nil, eventNumber: 2,
+            trackingNumber: 0, userData: nil)!
+        let exited = NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: orb.windowNumber, context: nil, eventNumber: 3,
+            trackingNumber: 0, userData: nil)!
+        pointer.location = NSPoint(x: orb.frame.midX, y: orb.frame.midY)
+        button.mouseExited(with: exited)
+        button.mouseEntered(with: entered)
+        precondition(!memo.isVisible, "Click mode must ignore pointer entry")
+        settings.memoFloatingTrigger = .hover
+        await settle()
+        button.mouseExited(with: exited)
+        button.mouseEntered(with: entered)
+        precondition(memo.isVisible && !orb.isVisible,
+                     "Hover entry must expand synchronously, without a dwell delay")
+        // Hiding the orb emits an exit; it must not dismiss the expanded workspace.
+        button.mouseExited(with: exited)
+        await settle()
+        precondition(memo.isVisible, "Moving from the disappearing orb into its editor must keep it open")
+        pointer.location = NSPoint(x: memo.frame.midX, y: memo.frame.midY)
+        await settle()
+        precondition(memo.isVisible, "Moving around inside the editor must keep it open")
+
+        // AppKit popovers outside the editor are part of the same work area.
+        let popover = NSPopover()
+        popover.animates = false
+        popover.behavior = .applicationDefined
+        let popoverContent = NSViewController()
+        popoverContent.view = NSView(frame: NSRect(x: 0, y: 0, width: 120, height: 90))
+        popover.contentViewController = popoverContent
+        popover.show(relativeTo: NSRect(x: 0, y: 100, width: 1, height: 1),
+                     of: memo.contentView!, preferredEdge: .minX)
+        guard let popoverWindow = popoverContent.view.window else {
+            throw failure("AppKit did not create the workspace popover")
+        }
+        pointer.location = NSPoint(x: popoverWindow.frame.midX, y: popoverWindow.frame.midY)
+        precondition(!memo.frame.contains(pointer.location), "Popover fixture must extend beyond the editor")
+        await settle()
+        precondition(memo.isVisible, "A related popover outside the editor must remain usable")
+        popover.close()
+        pointer.location = NSPoint(x: area.minX - 1000, y: area.minY - 1000)
+        await settle()
+        precondition(!memo.isVisible && orb.isVisible && orb.frame == savedFrame,
+                     "Leaving the entire hover workspace must automatically collapse at the original anchor")
+
+        // A manual collapse remains effective even if the restored orb is under the pointer.
+        pointer.location = NSPoint(x: orb.frame.midX, y: orb.frame.midY)
+        button.mouseEntered(with: entered)
+        precondition(memo.isVisible)
+        controller.collapse()
+        button.mouseEntered(with: entered)
+        await settle()
+        precondition(!memo.isVisible && orb.frame == savedFrame,
+                     "Manual collapse underneath the pointer must not immediately reopen")
+        button.mouseExited(with: exited)
+        // Mouse-down suppresses hover while the native click/drag control is active.
+        button.mouseDown(with: event)
+        button.mouseEntered(with: entered)
+        precondition(!memo.isVisible, "An active click/drag must not trigger hover expansion")
+        button.mouseUp(with: event)
+        precondition(memo.isVisible, "Click activation remains available in hover mode")
+        pointer.location = NSPoint(x: area.minX - 1000, y: area.minY - 1000)
+        await settle()
+        precondition(memo.isVisible, "A click-opened editor must not auto-collapse in hover mode")
+        controller.collapse()
+        pointer.location = NSPoint(x: orb.frame.midX, y: orb.frame.midY)
+        button.mouseExited(with: exited)
+        button.mouseEntered(with: entered)
+        precondition(memo.isVisible)
+        settings.memoFloatingTrigger = .click
+        await settle()
+        pointer.location = NSPoint(x: area.minX - 1000, y: area.minY - 1000)
+        await settle()
+        precondition(memo.isVisible, "Switching an open hover editor to click mode must stop auto-collapse")
+        settings.memoFloatingTrigger = .hover
+        await settle()
+        precondition(memo.isVisible, "Switching to hover must not change an already manual editor")
+        memo.cancelOperation(nil)
+        precondition(!memo.isVisible && orb.isVisible, "Escape must still collapse a manual editor")
+        pointer.location = NSPoint(x: orb.frame.midX, y: orb.frame.midY)
+        button.mouseExited(with: exited)
+        button.mouseEntered(with: entered)
+        precondition(memo.isVisible)
+        memo.cancelOperation(nil)
+        button.mouseEntered(with: entered)
+        await settle()
+        precondition(!memo.isVisible, "Escape must collapse hover expansion without an immediate reopen")
+        button.mouseExited(with: exited)
+        button.mouseEntered(with: entered)
+        precondition(memo.isVisible)
+        settings.setMemoFloatingEnabled(false)
+        await settle()
+        precondition(!memo.isVisible && !orb.isVisible, "Disabling the orb closes the hover workspace")
+        pointer.location = NSPoint(x: -100000, y: -100000)
+        settings.setMemoFloatingEnabled(true)
+        await settle()
 
         // Explicit opt-out hides both windows while retaining the home module.
         controller.expand()
@@ -191,9 +325,11 @@ struct MemoFloatingValidation {
         settings.setMemoFloatingEnabled(true)
         fixtureDefaults["workspace-placement-备忘录"] = "home"
         fixtureDefaults.removeValue(forKey: "memo-floating-enabled")
+        fixtureDefaults.removeValue(forKey: "memo-floating-trigger")
         UserDefaults.standard.setVolatileDomain(fixtureDefaults, forName: UserDefaults.argumentDomain)
         let reloadedSettings = AppSettingsStore()
         precondition(reloadedSettings.memoFloatingEnabled, "Explicit opt-in must persist across launches")
+        precondition(reloadedSettings.memoFloatingTrigger == .hover, "Hover preference must persist across launches")
         let restored = MemoFloatingController(store: store, settings: reloadedSettings, defaults: defaults)
         defer { restored.stop() }
         restored.start()
@@ -270,6 +406,9 @@ struct MemoFloatingValidation {
         precondition(!invalidSavedSettings.memoFloatingEnabled
                      && !UserDefaults.standard.bool(forKey: "memo-floating-enabled"),
                      "An invalid saved opt-in must be cleared at startup")
+        fixtureDefaults["memo-floating-trigger"] = "unsupported"
+        UserDefaults.standard.setVolatileDomain(fixtureDefaults, forName: UserDefaults.argumentDomain)
+        precondition(AppSettingsStore().memoFloatingTrigger == .click, "Unknown activation modes fall back to click")
     }
 
     @MainActor static func settle() async { try? await Task.sleep(for: .milliseconds(100)) }

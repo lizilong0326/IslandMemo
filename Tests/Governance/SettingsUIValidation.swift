@@ -56,6 +56,18 @@ struct SettingsUIValidation {
             try render(view, to: output.appendingPathComponent("settings-\(pane.rawValue).png"))
             precondition(view.bounds.width == 1100 && view.bounds.height == 680)
         }
+        settings.setMemoFloatingEnabled(true)
+        for trigger in AppSettingsStore.MemoFloatingTrigger.allCases {
+            settings.memoFloatingTrigger = trigger
+            let view = NSHostingView(rootView: DisplaySettingsView(settings: settings, tasks: tasks,
+                pomodoro: pomodoro, recordings: recordings, notifyServer: notifications,
+                aiApplications: applications, music: music, onEditShortcut: {}, initialPane: .memo,
+                transcriptionHasAPIKey: { false }))
+            window.contentView = view
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            try render(view, to: output.appendingPathComponent("settings-memo-\(trigger.rawValue).png"))
+        }
+        settings.setMemoFloatingEnabled(false)
         let home = NSHostingView(rootView: IslandView(store: tasks,
             clipboardStore: ClipboardStore(dataDirectory: directory), linksStore: LinksStore(dataDirectory: directory),
             commandsStore: CommandsStore(dataDirectory: directory), pomodoroStore: pomodoro,

@@ -39,6 +39,14 @@ final class AppSettingsStore: ObservableObject {
         var label: String { self == .digital ? "数字" : "钟表" }
     }
 
+    enum MemoFloatingTrigger: String, CaseIterable, Identifiable, Sendable {
+        case click
+        case hover
+
+        var id: Self { self }
+        var label: String { self == .click ? "点击展开" : "Hover 展开" }
+    }
+
     enum Feature: String, CaseIterable, Identifiable, Sendable {
         case memo = "备忘录"
         case clipboard = "复制记录"
@@ -322,6 +330,9 @@ final class AppSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(memoCategoriesEnabled, forKey: "memo-categories-enabled") }
     }
     @Published private(set) var memoFloatingEnabled: Bool
+    @Published var memoFloatingTrigger: MemoFloatingTrigger {
+        didSet { UserDefaults.standard.set(memoFloatingTrigger.rawValue, forKey: "memo-floating-trigger") }
+    }
     @Published private(set) var memoCategories: [MemoCategory]
     @Published var clockStyle: ClockStyle {
         didSet { UserDefaults.standard.set(clockStyle.rawValue, forKey: "home-clock-style") }
@@ -476,6 +487,8 @@ final class AppSettingsStore: ObservableObject {
             && defaults.bool(forKey: "memo-floating-enabled")
         memoFloatingEnabled = restoredMemoFloating
         if !restoredMemoFloating { defaults.set(false, forKey: "memo-floating-enabled") }
+        memoFloatingTrigger = defaults.string(forKey: "memo-floating-trigger")
+            .flatMap(MemoFloatingTrigger.init(rawValue:)) ?? .click
         homeLayoutReadOnly = storedSizeIsInvalid
         let savedPanelWidth = defaults.double(forKey: "panel-width")
         panelWidth = Self.clamp(

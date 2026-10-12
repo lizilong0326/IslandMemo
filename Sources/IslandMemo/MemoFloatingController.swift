@@ -8,6 +8,7 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
     private let store: TaskStore
     private let settings: AppSettingsStore
     private let defaults: UserDefaults
+    private let mouseLocation: @MainActor () -> NSPoint
     private(set) var orbPanel: NSPanel?
     private(set) var memoPanel: NSPanel?
     private var settingsObservation: AnyCancellable?
@@ -16,19 +17,26 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
     private var localMouseMonitor: Any?
     private var isPositioning = false
     private var isStarted = false
+    private var expansionAnchorFrame: NSRect?
+    private enum ExpansionSource { case click, hover }
+    private var expansionSource: ExpansionSource?
+    private var hoverTrackingTimer: Timer?
+    private var suppressHoverUntilExit = false
     private static let positionKey = "memo-floating-orb-frame-v1"
 
-    init(store: TaskStore, settings: AppSettingsStore, defaults: UserDefaults = .standard) {
+    init(store: TaskStore, settings: AppSettingsStore, defaults: UserDefaults = .standard,
+         mouseLocation: @escaping @MainActor () -> NSPoint = { NSEvent.mouseLocation }) {
         self.store = store
         self.settings = settings
         self.defaults = defaults
+        self.mouseLocation = mouseLocation
     }
 
     func start() {
         guard !isStarted else { return }
         isStarted = true
-        settingsObservation = Publishers.CombineLatest3(settings.$enabledFeatures, settings.$enabledHomeModules,
-                                                        settings.$memoFloatingEnabled)
+        settingsObservation = Publishers.CombineLatest4(settings.$enabledFeatures, settings.$enabledHomeModules,
+                                                        settings.$memoFloatingEnabled, settings.$memoFloatingTrigger)
             .sink { [weak self] _ in
                 // @Published emits before assignment; inspect the committed placement
                 // after both the tab and home-module sets have been updated.
@@ -57,6 +65,10 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
 
     func stop() {
         isStarted = false
+        stopHoverTracking()
+        expansionSource = nil
+        suppressHoverUntilExit = false
+        expansionAnchorFrame = nil
         settingsObservation = nil
         if let screenObservation { NotificationCenter.default.removeObserver(screenObservation) }
         screenObservation = nil
@@ -72,7 +84,16 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
 
     private func syncVisibility() {
         guard isStarted else { return }
+        if settings.memoFloatingTrigger != .hover, expansionSource == .hover {
+            // Switching to click mode keeps the current editor open under manual control.
+            expansionSource = .click
+            stopHoverTracking()
+        }
         guard isEnabled else {
+            stopHoverTracking()
+            expansionSource = nil
+            suppressHoverUntilExit = false
+            expansionAnchorFrame = nil
             orbPanel?.orderOut(nil)
             memoPanel?.orderOut(nil)
             return
@@ -82,9 +103,15 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
     }
 
     func expand() {
+        expand(source: .click)
+    }
+
+    private func expand(source: ExpansionSource) {
         guard isStarted, isEnabled else { return }
         installPanelsIfNeeded()
-        guard let orbPanel, let memoPanel else { return }
+        guard let orbPanel, let memoPanel, !memoPanel.isVisible else { return }
+        expansionAnchorFrame = orbPanel.frame
+        expansionSource = source
         let area = screen(for: orbPanel.frame).visibleFrame
         let size = NSSize(width: min(MemoFloatingMetrics.windowSize.width, area.width - 16),
                           height: min(MemoFloatingMetrics.windowSize.height, area.height - 16))
@@ -93,14 +120,18 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
         position(memoPanel, frame: Self.clamped(target, to: area))
         orbPanel.orderOut(nil)
         memoPanel.makeKeyAndOrderFront(nil)
+        if source == .hover { startHoverTracking() }
     }
 
     func collapse() {
         guard isStarted, let memoPanel, memoPanel.isVisible, let orbPanel else { return }
-        let side = MemoFloatingMetrics.orbSide
-        let target = NSRect(x: memoPanel.frame.maxX - side, y: memoPanel.frame.maxY - side,
-                            width: side, height: side)
-        position(orbPanel, frame: Self.clamped(target, to: screen(for: memoPanel.frame).visibleFrame))
+        stopHoverTracking()
+        expansionSource = nil
+        let anchor = expansionAnchorFrame ?? orbPanel.frame
+        position(orbPanel, frame: Self.clamped(anchor, to: screen(for: anchor).visibleFrame))
+        expansionAnchorFrame = nil
+        // Showing the orb underneath the pointer must not immediately undo a collapse.
+        suppressHoverUntilExit = orbPanel.frame.contains(mouseLocation())
         savePosition()
         memoPanel.orderOut(nil)
         if isEnabled { orbPanel.orderFrontRegardless() }
@@ -112,13 +143,49 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
             let area = screen(for: window.frame).visibleFrame
             position(window, frame: Self.clamped(window.frame, to: area))
             savePosition()
-        } else if window === memoPanel, let orbPanel {
-            let side = MemoFloatingMetrics.orbSide
-            let anchor = NSRect(x: window.frame.maxX - side, y: window.frame.maxY - side,
-                                width: side, height: side)
-            position(orbPanel, frame: Self.clamped(anchor, to: screen(for: window.frame).visibleFrame))
-            savePosition()
         }
+    }
+
+    func orbHoverChanged(_ isHovering: Bool) {
+        if !isHovering { suppressHoverUntilExit = false; return }
+        guard isStarted, isEnabled, settings.memoFloatingTrigger == .hover,
+              !suppressHoverUntilExit, memoPanel?.isVisible != true,
+              orbPanel?.isVisible == true,
+              orbPanel?.frame.contains(mouseLocation()) == true,
+              NSEvent.pressedMouseButtons == 0 else { return }
+        expand(source: .hover)
+    }
+
+    private func beginOrbInteraction() {
+        suppressHoverUntilExit = true
+    }
+
+    private func startHoverTracking() {
+        stopHoverTracking()
+        // Only hover-opened editors need polling. Common modes also cover AppKit
+        // popover/menu tracking without global input monitoring or permissions.
+        let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkHoverWorkspace() }
+        }
+        timer.tolerance = 0.01
+        RunLoop.main.add(timer, forMode: .common)
+        hoverTrackingTimer = timer
+    }
+
+    private func stopHoverTracking() {
+        hoverTrackingTimer?.invalidate()
+        hoverTrackingTimer = nil
+    }
+
+    private func checkHoverWorkspace() {
+        guard isStarted, isEnabled, expansionSource == .hover,
+              let memoPanel, memoPanel.isVisible else { return }
+        // A held mouse button can be moving the editor or selecting within a popover.
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        let pointer = mouseLocation()
+        if expansionAnchorFrame?.contains(pointer) == true { return }
+        if WindowInteractionPolicy.contains(pointer, in: memoPanel) { return }
+        collapse()
     }
 
     private func installPanelsIfNeeded() {
@@ -134,7 +201,10 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
         } ?? initial
         let orb = makePanel(title: "备忘录悬浮球")
         orb.identifier = WindowInteractionPolicy.orb
-        orb.contentView = NSHostingView(rootView: MemoOrbView(store: store) { [weak self] in self?.expand() })
+        orb.contentView = NSHostingView(rootView: MemoOrbView(store: store, settings: settings,
+            onActivate: { [weak self] in self?.expand() },
+            onHoverChanged: { [weak self] in self?.orbHoverChanged($0) },
+            onInteractionStarted: { [weak self] in self?.beginOrbInteraction() }))
         orbPanel = orb
         position(orb, frame: Self.clamped(restored, to: screen(for: restored).visibleFrame))
 
@@ -187,12 +257,12 @@ final class MemoFloatingController: NSObject, NSWindowDelegate {
 
     private func fitToScreen() {
         guard isStarted, let orbPanel else { return }
+        let anchor = expansionAnchorFrame ?? orbPanel.frame
+        position(orbPanel, frame: Self.clamped(anchor, to: screen(for: anchor).visibleFrame))
+        if expansionAnchorFrame != nil { expansionAnchorFrame = orbPanel.frame }
+        savePosition()
         if let memoPanel, memoPanel.isVisible {
             position(memoPanel, frame: Self.clamped(memoPanel.frame, to: screen(for: memoPanel.frame).visibleFrame))
-            windowDidMove(Notification(name: NSWindow.didMoveNotification, object: memoPanel))
-        } else {
-            position(orbPanel, frame: Self.clamped(orbPanel.frame, to: screen(for: orbPanel.frame).visibleFrame))
-            savePosition()
         }
     }
 

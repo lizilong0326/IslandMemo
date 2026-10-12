@@ -10,7 +10,10 @@ enum MemoFloatingMetrics {
 
 struct MemoOrbView: View {
     @ObservedObject var store: TaskStore
+    @ObservedObject var settings: AppSettingsStore
     let onActivate: () -> Void
+    let onHoverChanged: (Bool) -> Void
+    let onInteractionStarted: () -> Void
 
     private var pendingCount: Int {
         store.activeTasks.filter { !$0.isCompleted }.count
@@ -21,8 +24,11 @@ struct MemoOrbView: View {
             .overlay {
                 MemoOrbDragControl(
                     label: "备忘录，\(pendingCount) 个未完成任务",
-                    toolTip: "点击打开备忘录 · 拖动调整位置",
-                    onActivate: onActivate
+                    toolTip: settings.memoFloatingTrigger == .hover
+                        ? "移入立即展开备忘录 · 移出工作区域自动收起" : "点击打开备忘录 · 拖动调整位置",
+                    onActivate: onActivate,
+                    onHoverChanged: onHoverChanged,
+                    onInteractionStarted: onInteractionStarted
                 )
             }
     }
@@ -127,6 +133,8 @@ private struct MemoOrbDragControl: NSViewRepresentable {
     let label: String
     let toolTip: String
     let onActivate: () -> Void
+    let onHoverChanged: (Bool) -> Void
+    let onInteractionStarted: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onActivate) }
 
@@ -145,6 +153,8 @@ private struct MemoOrbDragControl: NSViewRepresentable {
         context.coordinator.onActivate = onActivate
         button.setAccessibilityLabel(label)
         button.toolTip = toolTip
+        button.onHoverChanged = onHoverChanged
+        button.onInteractionStarted = onInteractionStarted
     }
 
     final class Coordinator: NSObject {
@@ -155,12 +165,28 @@ private struct MemoOrbDragControl: NSViewRepresentable {
 }
 
 private final class MemoOrbButton: NSButton {
+    var onHoverChanged: ((Bool) -> Void)?
+    var onInteractionStarted: (() -> Void)?
+    private var hoverTrackingArea: NSTrackingArea?
     private var originalMouseDown: NSEvent?
     private var startedWindowDrag = false
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHoverChanged?(true) }
+    override func mouseExited(with event: NSEvent) { onHoverChanged?(false) }
+
     override func mouseDown(with event: NSEvent) {
+        onInteractionStarted?()
         originalMouseDown = event
         startedWindowDrag = false
     }
