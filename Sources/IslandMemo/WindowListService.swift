@@ -21,7 +21,12 @@ final class WindowListService: ObservableObject {
     @Published private(set) var screenRecordingRestartRequired = false
     @Published private(set) var needsAccessibility = !AXIsProcessTrusted()
 
+    private let enumeratesSystemWindows: Bool
+
+    init(enumeratesSystemWindows: Bool = true) { self.enumeratesSystemWindows = enumeratesSystemWindows }
+
     func refresh() {
+        guard enumeratesSystemWindows else { return }
         let hasScreenRecordingAccess = CGPreflightScreenCaptureAccess()
         needsAccessibility = !AXIsProcessTrusted()
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {

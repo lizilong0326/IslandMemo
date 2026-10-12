@@ -321,6 +321,7 @@ final class AppSettingsStore: ObservableObject {
     @Published var memoCategoriesEnabled: Bool {
         didSet { UserDefaults.standard.set(memoCategoriesEnabled, forKey: "memo-categories-enabled") }
     }
+    @Published private(set) var memoFloatingEnabled: Bool
     @Published private(set) var memoCategories: [MemoCategory]
     @Published var clockStyle: ClockStyle {
         didSet { UserDefaults.standard.set(clockStyle.rawValue, forKey: "home-clock-style") }
@@ -360,6 +361,19 @@ final class AppSettingsStore: ObservableObject {
         didSet { applyAutoLaunch() }
     }
     @Published var settingsError: String?
+    @Published var settingsNotice: String?
+    @Published private(set) var isUpdatingCategories = false
+    @Published var clipboardMonitoringEnabled: Bool {
+        didSet { UserDefaults.standard.set(clipboardMonitoringEnabled, forKey: "clipboard-monitoring-enabled"); onClipboardConfigurationChanged?() }
+    }
+    @Published var agentNotificationsEnabled: Bool {
+        didSet { UserDefaults.standard.set(agentNotificationsEnabled, forKey: "agent-notifications-enabled"); onBackgroundConfigurationChanged?() }
+    }
+    @Published var codexMonitoringEnabled: Bool {
+        didSet { UserDefaults.standard.set(codexMonitoringEnabled, forKey: "codex-monitoring-enabled"); onBackgroundConfigurationChanged?() }
+    }
+    var onBackgroundConfigurationChanged: (() -> Void)?
+    private static let defaultHomeModules: Set<HomeModule> = [.music, .pomodoro, .recorder, .windows, .clock, .calendar]
 
     init() {
         let defaults = UserDefaults.standard
@@ -378,13 +392,7 @@ final class AppSettingsStore: ObservableObject {
         let defaultFeatureOrder = Feature.allCases
         let savedFeatureOrder = (defaults.array(forKey: "feature-order") as? [String])?
             .compactMap(Feature.init(rawValue:))
-        if let savedFeatureOrder,
-           savedFeatureOrder.count == defaultFeatureOrder.count,
-           Set(savedFeatureOrder) == Set(defaultFeatureOrder) {
-            featureOrder = savedFeatureOrder
-        } else {
-            featureOrder = defaultFeatureOrder
-        }
+        featureOrder = Self.completedOrder(savedFeatureOrder ?? [], defaults: defaultFeatureOrder)
 
         let legacyHomeModules: [HomeModule] = [
             .music, .pomodoro, .recorder, .windows, .mirror, .note, .commands, .clock, .calendar, .completions,
@@ -395,7 +403,7 @@ final class AppSettingsStore: ObservableObject {
                 homeModules.insert(module)
             }
         }
-        if homeModules.isEmpty { homeModules = Set(legacyHomeModules) }
+
         enabledHomeModules = homeModules
 
         var moduleSizes: [HomeModule: HomeModuleSize] = [:]
@@ -414,14 +422,19 @@ final class AppSettingsStore: ObservableObject {
         let savedOrder = (defaults.array(forKey: "home-module-order") as? [String])?
             .compactMap(HomeModule.init(rawValue:))
         let resolvedHomeModuleOrder: [HomeModule]
-        if let savedOrder,
-           savedOrder.count == defaultOrder.count,
-           Set(savedOrder) == Set(defaultOrder) {
-            resolvedHomeModuleOrder = savedOrder
-        } else {
-            resolvedHomeModuleOrder = defaultOrder
-        }
+        resolvedHomeModuleOrder = Self.completedOrder(savedOrder ?? [], defaults: defaultOrder)
         homeModuleOrder = resolvedHomeModuleOrder
+        let hasLegacyLayout = Feature.allCases.contains { defaults.object(forKey: $0.defaultsKey) != nil }
+            || HomeModule.allCases.contains { defaults.object(forKey: $0.defaultsKey) != nil }
+            || defaults.object(forKey: "home-module-order") != nil
+        let hasUnifiedLayout = Feature.movableCases.contains {
+            defaults.object(forKey: "workspace-placement-\($0.rawValue)") != nil
+        }
+        if !hasLegacyLayout && !hasUnifiedLayout {
+            // A fresh installation and reset use the same deterministic placements.
+            homeModules = Self.defaultHomeModules
+            features = Set(Feature.movableCases.filter { !homeModules.contains($0.homeModule!) })
+        }
         // v0.2.34 起每个业务功能只能处于顶部、首页或隐藏三种位置之一。
         // 首次升级沿用旧版位置；之后以统一位置键为准。
         for feature in Feature.movableCases {
@@ -433,26 +446,36 @@ final class AppSettingsStore: ObservableObject {
             if placement == .tab { features.insert(feature) }
             if placement == .home { homeModules.insert(module) }
         }
-        // 旧版本可能已经在首页放了超过六个模块。升级时随机隐藏溢出的模块，
-        // 并立即保存结果，确保只处理一次，后续启动不会反复随机变化。
-        let overflowCount = max(0, homeModules.count - Self.maximumHomeModuleCount)
-        if overflowCount > 0 {
-            for module in homeModules.shuffled().prefix(overflowCount) {
-                homeModules.remove(module)
-                features.remove(module.feature)
-                defaults.set(WorkspacePlacement.hidden.rawValue, forKey: "workspace-placement-\(module.feature.rawValue)")
-                defaults.set(false, forKey: module.feature.defaultsKey)
-                defaults.set(false, forKey: module.defaultsKey)
-            }
+        // Keep the first six in the user's saved Home order; preserve overflow as tabs.
+        // Persist every resolved placement once so subsequent launches cannot change it.
+        let overflow = resolvedHomeModuleOrder.filter(homeModules.contains).dropFirst(Self.maximumHomeModuleCount)
+        for module in overflow {
+            homeModules.remove(module)
+            features.insert(module.feature)
         }
+        for feature in Feature.movableCases {
+            guard let module = feature.homeModule else { continue }
+            if features.contains(feature) { homeModules.remove(module) }
+            let placement: WorkspacePlacement = features.contains(feature) ? .tab : (homeModules.contains(module) ? .home : .hidden)
+            defaults.set(placement.rawValue, forKey: "workspace-placement-\(feature.rawValue)")
+            defaults.set(placement == .tab, forKey: feature.defaultsKey)
+            defaults.set(placement == .home, forKey: module.defaultsKey)
+        }
+        defaults.set(2, forKey: "workspace-layout-version")
         if features.intersection(Set(Feature.movableCases)).isEmpty && homeModules.isEmpty {
             features.insert(.memo)
+            defaults.set(WorkspacePlacement.tab.rawValue, forKey: "workspace-placement-\(Feature.memo.rawValue)")
+            defaults.set(true, forKey: Feature.memo.defaultsKey)
         }
         if homeModules.isEmpty { features.remove(.home) }
         else { features.insert(.home) }
         features.insert(.settings)
         enabledFeatures = features
         enabledHomeModules = homeModules
+        let restoredMemoFloating = (homeModules.contains(.memo) || features.contains(.memo))
+            && defaults.bool(forKey: "memo-floating-enabled")
+        memoFloatingEnabled = restoredMemoFloating
+        if !restoredMemoFloating { defaults.set(false, forKey: "memo-floating-enabled") }
         homeLayoutReadOnly = storedSizeIsInvalid
         let savedPanelWidth = defaults.double(forKey: "panel-width")
         panelWidth = Self.clamp(
@@ -472,7 +495,7 @@ final class AppSettingsStore: ObservableObject {
         memoCategoriesEnabled = defaults.object(forKey: "memo-categories-enabled") as? Bool ?? true
         if let data = defaults.data(forKey: "memo-categories-v1"),
            let decoded = try? JSONDecoder().decode([MemoCategory].self, from: data),
-           !decoded.isEmpty, decoded.count <= 4 {
+           !decoded.isEmpty, decoded.count <= 4, Set(decoded.map(\.id)).count == decoded.count {
             memoCategories = decoded
         } else {
             memoCategories = Self.defaultMemoCategories
@@ -499,6 +522,9 @@ final class AppSettingsStore: ObservableObject {
         })
         shortcutDisplayText = ShortcutConfiguration.load().displayText
         autoLaunch = SMAppService.mainApp.status == .enabled
+        clipboardMonitoringEnabled = defaults.object(forKey: "clipboard-monitoring-enabled") as? Bool ?? true
+        agentNotificationsEnabled = defaults.object(forKey: "agent-notifications-enabled") as? Bool ?? true
+        codexMonitoringEnabled = defaults.object(forKey: "codex-monitoring-enabled") as? Bool ?? true
     }
 
     func isEnabled(_ feature: Feature) -> Bool {
@@ -529,6 +555,18 @@ final class AppSettingsStore: ObservableObject {
         return .hidden
     }
 
+    var canEnableMemoFloating: Bool { workspacePlacement(for: .memo) != .hidden }
+
+    func setMemoFloatingEnabled(_ enabled: Bool) {
+        guard !enabled || canEnableMemoFloating else { return }
+        memoFloatingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "memo-floating-enabled")
+    }
+
+    private func reconcileMemoFloatingAvailability() {
+        if !canEnableMemoFloating && memoFloatingEnabled { setMemoFloatingEnabled(false) }
+    }
+
     func setWorkspacePlacement(_ feature: Feature, placement: WorkspacePlacement) {
         guard let module = feature.homeModule else { return }
         let oldPlacement = workspacePlacement(for: feature)
@@ -557,27 +595,12 @@ final class AppSettingsStore: ObservableObject {
             return
         }
 
-        let visible = homeModuleOrder.filter(nextModules.contains)
-        if !visible.isEmpty {
-            let sizes = normalizeHomeModuleSizes(
-                homeModuleSizes,
-                visibleModules: visible,
-                preferred: placement == .home ? module : nil
-            )
-            guard canPackHomeModules(sizes, visibleModules: visible) else {
-                settingsError = "首页空间不足，请先隐藏或移出一个模块"
-                return
-            }
-            homeModuleSizes = sizes
-            for visibleModule in visible {
-                persist(sizes[visibleModule]?.rawValue, forKey: "home-module-size-\(visibleModule)")
-            }
-        }
         enabledFeatures = nextFeatures
         enabledHomeModules = nextModules
         if nextModules.isEmpty { enabledFeatures.remove(.home) }
         else { enabledFeatures.insert(.home) }
         enabledFeatures.insert(.settings)
+        reconcileMemoFloatingAvailability()
         UserDefaults.standard.set(placement.rawValue, forKey: "workspace-placement-\(feature.rawValue)")
         UserDefaults.standard.set(placement == .tab, forKey: feature.defaultsKey)
         UserDefaults.standard.set(placement == .home, forKey: module.defaultsKey)
@@ -642,6 +665,7 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func addMemoCategory() {
+        guard !isUpdatingCategories else { return }
         guard memoCategories.count < 4 else {
             settingsError = "备忘录最多可以创建 4 个分类"
             return
@@ -655,6 +679,7 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func updateMemoCategory(_ category: MemoCategory, name: String? = nil, colorHex: String? = nil) {
+        guard !isUpdatingCategories else { return }
         guard let index = memoCategories.firstIndex(where: { $0.id == category.id }) else { return }
         if let name {
             let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -665,6 +690,7 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func setMemoCategorySize(_ category: MemoCategory, size: MemoCategory.Size) {
+        guard !isUpdatingCategories else { return }
         guard let index = memoCategories.firstIndex(where: { $0.id == category.id }) else { return }
         // The 12 x 4 grid has one featured slot. Expanding a category therefore
         // returns its siblings to standard size and always keeps a gapless layout.
@@ -673,16 +699,32 @@ final class AppSettingsStore: ObservableObject {
         persistMemoCategories()
     }
 
-    func removeMemoCategory(_ category: MemoCategory) {
+    /// Unknown legacy IDs share the first category instead of disappearing from the board.
+    func resolvedMemoCategoryID(_ id: String?) -> String? {
+        if let id, memoCategories.contains(where: { $0.id == id }) { return id }
+        return memoCategories.first?.id
+    }
+
+    func removeMemoCategory(_ category: MemoCategory, tasks: TaskStore) async {
+        guard !isUpdatingCategories, memoCategories.contains(where: { $0.id == category.id }) else { return }
         guard memoCategories.count > 1 else {
             settingsError = "备忘录至少保留一个分类"
             return
         }
-        memoCategories.removeAll { $0.id == category.id }
+        isUpdatingCategories = true
+        defer { isUpdatingCategories = false }
+        let remaining = memoCategories.filter { $0.id != category.id }
+        guard await tasks.migrateCategories(validIDs: Set(remaining.map(\.id)), targetID: remaining.first?.id) else {
+            settingsError = "任务分类迁移未能保存，分类已保留；请重试。"
+            return
+        }
+        memoCategories = remaining
         persistMemoCategories()
+        settingsNotice = "分类已删除，任务已移至“\(remaining.first?.name ?? "未分类")”；已完成和回收站任务一并保留。"
     }
 
     func moveMemoCategory(_ sourceID: String, before targetID: String) {
+        guard !isUpdatingCategories else { return }
         guard sourceID != targetID,
               let sourceIndex = memoCategories.firstIndex(where: { $0.id == sourceID }),
               let targetIndex = memoCategories.firstIndex(where: { $0.id == targetID }) else { return }
@@ -692,9 +734,17 @@ final class AppSettingsStore: ObservableObject {
         persistMemoCategories()
     }
 
-    func resetMemoCategories() {
+    func resetMemoCategories(tasks: TaskStore) async {
+        guard !isUpdatingCategories else { return }
+        isUpdatingCategories = true
+        defer { isUpdatingCategories = false }
+        guard await tasks.migrateCategories(validIDs: Set(Self.defaultMemoCategories.map(\.id)), targetID: Self.defaultMemoCategories.first?.id) else {
+            settingsError = "任务分类迁移未能保存，原分类已保留；请重试。"
+            return
+        }
         memoCategories = Self.defaultMemoCategories
         persistMemoCategories()
+        settingsNotice = "已恢复默认分类；原分类中的任务已移至“课程”，任务内容和完成状态保留。"
     }
 
     func isHomeModuleEnabled(_ module: HomeModule) -> Bool {
@@ -702,48 +752,23 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func setHomeModule(_ module: HomeModule, enabled: Bool) {
-        if !enabled {
-            setWorkspacePlacement(module.feature, placement: .hidden)
-            return
-        }
-        guard !homeLayoutReadOnly else {
-            settingsError = "首页布局处于安全模式，请重新启动应用后再试"
-            return
-        }
-        if enabled,
-           !enabledHomeModules.contains(module),
-           enabledHomeModules.count >= Self.maximumHomeModuleCount {
-            settingsError = "首页最多显示 \(Self.maximumHomeModuleCount) 个模块，请先移出一个模块"
-            return
-        }
-        var candidate = enabledHomeModules
-        if enabled {
-            candidate.insert(module)
-        } else if candidate.count > 1 {
-            guard canDisableHomeModule?(module) ?? true else {
-                settingsError = "录音进行中，暂时不能隐藏快速录音模块"
-                return
-            }
-            candidate.remove(module)
-        } else {
-            settingsError = "首页至少保留一个模块"
-            return
-        }
-        let visible = homeModuleOrder.filter { candidate.contains($0) && $0 != .completions }
-        let sizes = normalizeHomeModuleSizes(homeModuleSizes, visibleModules: visible, preferred: nil)
-        let spans = visible.map {
+        setWorkspacePlacement(module.feature, placement: enabled ? .home : .hidden)
+    }
+
+    /// The only final layout resolver, shared by runtime, preview and settings diagnostics.
+    func resolvedHomeLayout(for modules: [HomeModule]) -> [HomeGridPlacement] {
+        let sizes = normalizedHomeModuleSizes(for: modules)
+        return HomeLayoutEngine.resolve(spans: modules.map {
             let size = sizes[$0] ?? Self.defaultSize(for: $0)
             return HomeGridSpan(columns: size.columns, rows: size.rows)
-        }
-        guard spans.isEmpty || HomeLayoutEngine.resolve(spans: spans) != nil else {
-            settingsError = "这组组件暂时无法铺满首页，设置没有更改"
-            return
-        }
-        enabledHomeModules = candidate
-        enabledFeatures.remove(module.feature)
-        enabledFeatures.insert(.home)
-        UserDefaults.standard.set(WorkspacePlacement.home.rawValue, forKey: "workspace-placement-\(module.feature.rawValue)")
-        persist(enabled, forKey: module.defaultsKey)
+        }) ?? []
+    }
+
+    func actualHomeModuleSpan(_ module: HomeModule) -> HomeGridSpan? {
+        let modules = orderedVisibleModules(includeCompletions: true)
+        guard let index = modules.firstIndex(of: module) else { return nil }
+        let layout = resolvedHomeLayout(for: modules)
+        return layout.indices.contains(index) ? layout[index].span : nil
     }
 
     func normalizedHomeModuleSizes(for visibleModules: [HomeModule]) -> [HomeModule: HomeModuleSize] {
@@ -751,22 +776,11 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func cycleHomeModuleSize(_ module: HomeModule, visibleModules: [HomeModule]) {
-        guard !homeLayoutReadOnly, visibleModules.contains(module) else { return }
-        var candidate = homeModuleSizes
+        guard visibleModules.contains(module) else { return }
         let allowed = Self.allowedSizes(for: module)
-        let current = candidate[module] ?? Self.defaultSize(for: module)
+        let current = homeModuleSizes[module] ?? Self.defaultSize(for: module)
         let index = allowed.firstIndex(of: current) ?? 0
-        candidate[module] = allowed[(index + 1) % allowed.count]
-        candidate = normalizeHomeModuleSizes(candidate, visibleModules: visibleModules, preferred: module)
-        guard visibleModules.reduce(0, { $0 + (candidate[$1]?.area ?? 0) }) <= 48,
-              canPackHomeModules(candidate, visibleModules: visibleModules) else {
-            settingsError = "当前首页空间不足，无法继续放大这个模块"
-            return
-        }
-        homeModuleSizes = candidate
-        for visibleModule in visibleModules {
-            persist(candidate[visibleModule]?.rawValue, forKey: "home-module-size-\(visibleModule)")
-        }
+        setHomeModuleSize(module, size: allowed[(index + 1) % allowed.count])
     }
 
     func orderedVisibleModules(includeCompletions: Bool) -> [HomeModule] {
@@ -792,57 +806,87 @@ final class AppSettingsStore: ObservableObject {
 
     func setHomeModuleSize(_ module: HomeModule, size: HomeModuleSize) {
         guard canResizeHomeModules else {
-            settingsError = "隐藏组件时由系统自动铺满；全部显示后才能设置单个尺寸"
+            settingsError = "首页尺寸配置异常，请恢复首页排列和尺寸后重试"
             return
         }
         guard Self.allowedSizes(for: module).contains(size) else {
-            settingsError = "常用指令最小尺寸为中"
+            settingsError = "\(module.rawValue)不支持这个优先尺寸"
             return
         }
-        let visible = orderedVisibleModules(includeCompletions: true)
-        var candidate = homeModuleSizes
-        candidate[module] = size
-        candidate = normalizeHomeModuleSizes(candidate, visibleModules: visible, preferred: module)
-        guard canPackHomeModules(candidate, visibleModules: visible) else {
-            settingsError = "这个尺寸组合无法完整铺满首页"
-            return
-        }
-        homeModuleSizes = candidate
-        for item in visible {
-            persist(candidate[item]?.rawValue, forKey: "home-module-size-\(item)")
-        }
+        // Preferences remain stable; fitting other cards never overwrites their preferences.
+        homeModuleSizes[module] = size
+        persist(size.rawValue, forKey: "home-module-size-\(module)")
     }
 
-    var usesAutomaticHomeLayout: Bool {
-        false
-    }
+    var usesAutomaticHomeLayout: Bool { true }
 
     var canResizeHomeModules: Bool {
         !homeLayoutReadOnly
     }
 
+    @Published private(set) var canUndoLayoutReset = false
+    private var undoLayoutReset: (() -> Void)?
+
+    private func rememberLayoutForUndo() {
+        let features = enabledFeatures, modules = enabledHomeModules
+        let order = featureOrder, homeOrder = homeModuleOrder, sizes = homeModuleSizes
+        let floating = memoFloatingEnabled, readOnly = homeLayoutReadOnly
+        undoLayoutReset = { [weak self] in
+            guard let self else { return }
+            self.enabledFeatures = features
+            self.enabledHomeModules = modules
+            self.featureOrder = order
+            self.homeModuleOrder = homeOrder
+            self.homeModuleSizes = sizes
+            self.homeLayoutReadOnly = readOnly
+            self.setMemoFloatingEnabled(floating)
+            self.persist(order.map(\.rawValue), forKey: "feature-order")
+            self.persist(homeOrder.map(\.rawValue), forKey: "home-module-order")
+            for module in HomeModule.allCases {
+                self.persist(sizes[module]?.rawValue, forKey: "home-module-size-\(module)")
+                let placement = self.workspacePlacement(for: module.feature)
+                UserDefaults.standard.set(placement.rawValue, forKey: "workspace-placement-\(module.feature.rawValue)")
+                UserDefaults.standard.set(placement == .tab, forKey: module.feature.defaultsKey)
+                UserDefaults.standard.set(placement == .home, forKey: module.defaultsKey)
+            }
+        }
+        canUndoLayoutReset = true
+    }
+
+    func undoLastLayoutReset() {
+        guard let undoLayoutReset else { return }
+        guard [HomeModule.recorder, .recordings].allSatisfy({ canDisableHomeModule?($0) ?? true }) else {
+            settingsError = "录音或转写收尾进行中，请完成后再撤销布局重置"
+            return
+        }
+        undoLayoutReset()
+        self.undoLayoutReset = nil
+        canUndoLayoutReset = false
+        settingsNotice = "已撤销布局重置"
+    }
+
     func resetHomeLayout() {
+        rememberLayoutForUndo()
         homeModuleOrder = Self.defaultHomeModuleOrder
         let rawSizes = Dictionary(uniqueKeysWithValues: HomeModule.allCases.map {
             ($0, Self.defaultSize(for: $0))
         })
-        homeModuleSizes = normalizeHomeModuleSizes(
-            rawSizes,
-            visibleModules: homeModuleOrder.filter(enabledHomeModules.contains),
-            preferred: nil
-        )
+        homeModuleSizes = rawSizes
         homeLayoutReadOnly = false
         persist(homeModuleOrder.map(\.rawValue), forKey: "home-module-order")
         for module in HomeModule.allCases {
             persist(homeModuleSizes[module]?.rawValue, forKey: "home-module-size-\(module)")
         }
-        settingsError = "首页模块顺序和尺寸已恢复默认"
+        settingsNotice = "首页排列和优先尺寸已恢复默认；功能位置和所有业务数据保留。"
     }
 
     func resetWorkspaceLayout() {
-        let defaultHome: Set<HomeModule> = [
-            .music, .pomodoro, .recorder, .windows, .clock, .calendar,
-        ]
+        guard [HomeModule.recorder, .recordings].allSatisfy({ canDisableHomeModule?($0) ?? true }) else {
+            settingsError = "录音或转写收尾进行中，请完成后再恢复功能位置"
+            return
+        }
+        rememberLayoutForUndo()
+        let defaultHome = Self.defaultHomeModules
         let defaultTabs = Set(Feature.movableCases.filter { feature in
             guard let module = feature.homeModule else { return true }
             return !defaultHome.contains(module)
@@ -850,11 +894,7 @@ final class AppSettingsStore: ObservableObject {
         featureOrder = Feature.allCases
         enabledFeatures = defaultTabs.union([.home, .settings])
         enabledHomeModules = defaultHome
-        homeModuleSizes = normalizeHomeModuleSizes(
-            homeModuleSizes,
-            visibleModules: homeModuleOrder.filter(defaultHome.contains),
-            preferred: nil
-        )
+        reconcileMemoFloatingAvailability()
         persist(featureOrder.map(\.rawValue), forKey: "feature-order")
         for module in defaultHome {
             persist(homeModuleSizes[module]?.rawValue, forKey: "home-module-size-\(module)")
@@ -866,7 +906,7 @@ final class AppSettingsStore: ObservableObject {
             UserDefaults.standard.set(placement == .tab, forKey: feature.defaultsKey)
             UserDefaults.standard.set(placement == .home, forKey: module.defaultsKey)
         }
-        settingsError = "功能位置和顶部顺序已恢复默认"
+        settingsNotice = "功能位置和顶部顺序已恢复默认；首页排列、优先尺寸和所有业务数据保留。"
     }
 
     @discardableResult
@@ -1029,6 +1069,11 @@ final class AppSettingsStore: ObservableObject {
         }
     }
 
+    private static func completedOrder<T: Hashable>(_ saved: [T], defaults: [T]) -> [T] {
+        var seen = Set<T>()
+        return (saved + defaults).filter { defaults.contains($0) && seen.insert($0).inserted }
+    }
+
     private static func moving<T>(_ source: [T], fromOffsets: IndexSet, toOffset: Int) -> [T] {
         let movingItems = fromOffsets.sorted().map { source[$0] }
         var result = source
@@ -1044,7 +1089,11 @@ final class AppSettingsStore: ObservableObject {
         homeLayoutPersisted = UserDefaults.standard.synchronize()
     }
 
+    private var isApplyingAutoLaunch = false
     private func applyAutoLaunch() {
+        guard !isApplyingAutoLaunch else { return }
+        isApplyingAutoLaunch = true
+        defer { isApplyingAutoLaunch = false }
         do {
             if autoLaunch {
                 try SMAppService.mainApp.register()

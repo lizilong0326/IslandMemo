@@ -28,6 +28,7 @@ swiftc -parse-as-library -swift-version 6 -target "$(uname -m)-apple-macos13.0" 
   Sources/IslandMemo/MemoAIService.swift \
   Sources/IslandMemo/MemoAICredentialStore.swift \
   Sources/IslandMemo/TaskItem.swift Sources/IslandMemo/TaskRepository.swift \
+  Sources/IslandMemo/WindowInteractionPolicy.swift \
   Sources/IslandMemo/TaskStore.swift Sources/IslandMemo/MemoCaptureController.swift \
   Sources/IslandMemo/AppSettingsStore.swift Sources/IslandMemo/ShortcutSettings.swift \
   Sources/IslandMemo/HomeLayoutEngine.swift Sources/IslandMemo/MemoCategoryLayoutEngine.swift \

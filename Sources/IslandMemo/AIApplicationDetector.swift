@@ -99,8 +99,8 @@ final class AIApplicationDetector: ObservableObject {
         ),
     ]
 
-    init() {
-        scan()
+    init(scanImmediately: Bool = true) {
+        if scanImmediately { scan() }
     }
 
     func scan() {

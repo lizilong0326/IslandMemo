@@ -44,15 +44,16 @@ struct RecordingsView: View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
                 Button { store.toggleRecording() } label: {
-                    Image(systemName: store.state == .idle ? "record.circle" : "stop.circle.fill")
+                    Image(systemName: store.controlSymbol)
                         .font(.system(size: 34))
                         .foregroundStyle(store.state == .idle ? .red : .white)
                 }
                 .buttonStyle(.plain)
-                .help(store.state == .idle ? "开始录音" : "停止录音")
+                .disabled(!store.canToggleRecording)
+                .help(store.statusText)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(store.state == .idle ? "点击开始录音" : "录音中 \(store.elapsedText)")
+                    Text(store.statusText)
                         .font(.callout.weight(.medium))
                         .monospacedDigit()
                     if store.state != .idle {

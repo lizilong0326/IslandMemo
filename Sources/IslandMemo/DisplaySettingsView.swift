@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum SettingsPane: String, CaseIterable, Identifiable {
+enum SettingsPane: String, CaseIterable, Identifiable {
     case display = "显示"
     case features = "功能与顺序"
     case memo = "备忘录"
@@ -16,6 +16,27 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case general = "通用"
 
     var id: Self { self }
+    var group: String {
+        switch self {
+        case .display, .features, .home: return "入口与显示"
+        case .memo, .clipboard, .music, .focus, .recording, .links, .credentials: return "功能设置"
+        case .aiTasks: return "连接与接入"
+        case .general: return "应用与本地数据"
+        }
+    }
+    var feature: AppSettingsStore.Feature? {
+        switch self {
+        case .memo: return .memo
+        case .clipboard: return .clipboard
+        case .aiTasks: return .completions
+        case .music: return .music
+        case .focus: return .pomodoro
+        case .recording: return .recorder
+        case .links: return .links
+        case .credentials: return .credentials
+        default: return nil
+        }
+    }
     var icon: String {
         switch self {
         case .display: return "rectangle.inset.filled"
@@ -37,6 +58,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
 /// 完整设置中心：左侧调整设置，右侧同步展示不可操作的效果预览。
 struct DisplaySettingsView: View {
     @ObservedObject var settings: AppSettingsStore
+    @ObservedObject var tasks: TaskStore
     @ObservedObject var pomodoro: PomodoroStore
     @ObservedObject var recordings: RecordingStore
     @ObservedObject var notifyServer: AgentNotifyServer
@@ -47,19 +69,54 @@ struct DisplaySettingsView: View {
     @State private var region = TranscriptionConfig.load().region
     @State private var workspaceId = TranscriptionConfig.load().workspaceId
     @State private var apiKeyInput = ""
-    @State private var transcriptionSaved = false
+    @State private var savedTranscriptionConfig = TranscriptionConfig.load()
+    @State private var transcriptionStatus = ""
+    @StateObject private var modelDraft = MemoAISettingsDraft()
+    @State private var selectedPreviewFeature: AppSettingsStore.Feature = .memo
     @State private var showsAPIRequired = false
     @State private var draggedMemoCategoryID: String?
+
+    private let transcriptionHasAPIKey: () -> Bool
+
+    init(settings: AppSettingsStore, tasks: TaskStore, pomodoro: PomodoroStore,
+         recordings: RecordingStore, notifyServer: AgentNotifyServer,
+         aiApplications: AIApplicationDetector, music: MusicService,
+         onEditShortcut: @escaping () -> Void, initialPane: SettingsPane = .features,
+         transcriptionHasAPIKey: @escaping () -> Bool = { TranscriptionConfig.load().apiKey != nil }) {
+        self.settings = settings
+        self.tasks = tasks
+        self.pomodoro = pomodoro
+        self.recordings = recordings
+        self.notifyServer = notifyServer
+        self.aiApplications = aiApplications
+        self.music = music
+        self.onEditShortcut = onEditShortcut
+        self.transcriptionHasAPIKey = transcriptionHasAPIKey
+        _pane = State(initialValue: initialPane)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             settingsSidebar
             Divider().overlay(IslandTheme.hairline)
-            editor.frame(width: 390)
+            VStack(spacing: 0) {
+                if let notice = settings.settingsNotice {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(notice).font(.caption).foregroundStyle(IslandTheme.accentGreen)
+                        HStack {
+                            if settings.canUndoLayoutReset { Button("撤销上次布局重置") { settings.undoLastLayoutReset() } }
+                            Spacer()
+                            Button("收起") { settings.settingsNotice = nil }
+                        }.font(.caption2).buttonStyle(.borderless)
+                    }.padding(12).background(IslandTheme.surface2)
+                }
+                editor
+            }.frame(width: 410)
             Divider().overlay(IslandTheme.hairline)
             SettingsReadOnlyPreview(
                 settings: settings,
                 pane: pane,
+                selectedFeature: selectedPreviewFeature,
                 pomodoroMinutes: pomodoro.durationMinutes,
                 notifyServerIsRunning: notifyServer.isRunning
             )
@@ -73,7 +130,7 @@ struct DisplaySettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openMemoAISettings)) { _ in
             pane = .clipboard
         }
-        .alert("提示", isPresented: Binding(
+        .alert("设置未完成", isPresented: Binding(
             get: { settings.settingsError != nil },
             set: { if !$0 { settings.settingsError = nil } }
         )) {
@@ -87,29 +144,32 @@ struct DisplaySettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("设置中心").font(.title3.weight(.semibold)).foregroundStyle(IslandTheme.text1)
-                Text("所有修改会自动保存").font(.caption2).foregroundStyle(IslandTheme.text3)
+                Text("偏好即时保存；连接配置需保存").font(.caption2).foregroundStyle(IslandTheme.text3)
             }
             .padding(.horizontal, 14)
             .padding(.top, 18)
 
-            VStack(spacing: 4) {
-                ForEach(SettingsPane.allCases) { item in
-                    Button { pane = item } label: {
-                        HStack(spacing: 9) {
-                            Image(systemName: item.icon).frame(width: 17)
-                            Text(item.rawValue)
-                            Spacer()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(["入口与显示", "功能设置", "连接与接入", "应用与本地数据"], id: \.self) { group in
+                        Text(group).font(.caption2.weight(.medium)).foregroundStyle(IslandTheme.text4)
+                            .padding(.horizontal, 11).padding(.top, 5)
+                        ForEach(SettingsPane.allCases.filter { $0.group == group }) { item in
+                            Button { pane = item } label: {
+                                HStack(spacing: 9) {
+                                    Image(systemName: item.icon).frame(width: 17)
+                                    Text(item.rawValue)
+                                    Spacer()
+                                }
+                                .font(.callout.weight(pane == item ? .semibold : .regular))
+                                .foregroundStyle(pane == item ? IslandTheme.text1 : IslandTheme.text3)
+                                .padding(.horizontal, 11).padding(.vertical, 7)
+                                .background(pane == item ? IslandTheme.surface2 : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                            }.buttonStyle(.plain)
                         }
-                        .font(.callout.weight(pane == item ? .semibold : .regular))
-                        .foregroundStyle(pane == item ? IslandTheme.text1 : IslandTheme.text3)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 8)
-                        .background(pane == item ? IslandTheme.surface2 : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                     }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 8)
+                }.padding(.horizontal, 8)
+            }.scrollIndicators(.never)
             Spacer()
         }
         .frame(width: 158)
@@ -174,7 +234,11 @@ struct DisplaySettingsView: View {
 
     private var featureEditor: some View {
         VStack(alignment: .leading, spacing: 12) {
-            editorHeader("功能与顺序", detail: "每个功能可放在顶部、首页或隐藏；首页最多 6 个模块")
+            editorHeader("功能与顶部顺序", detail: "选择主入口位置；拖动只调整顶部顺序，首页排列单独设置")
+            Button("调整首页排列与优先尺寸 →") { pane = .home }
+                .buttonStyle(.borderless).font(.caption)
+            Text("隐藏只收起入口；后台采集与服务在各功能设置中单独控制。")
+                .font(.caption2).foregroundStyle(IslandTheme.text3)
             List {
                 ForEach(settings.orderedMovableFeatures) { feature in
                     HStack(spacing: 10) {
@@ -188,7 +252,9 @@ struct DisplaySettingsView: View {
                         workspacePlacementControl(for: feature)
                     }
                     .padding(.vertical, 5)
-                    .listRowBackground(IslandTheme.surface1)
+                    .listRowBackground(selectedPreviewFeature == feature ? IslandTheme.surface2 : IslandTheme.surface1)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedPreviewFeature = feature }
                 }
                 .onMove(perform: settings.moveWorkspaceFeatures)
             }
@@ -196,14 +262,14 @@ struct DisplaySettingsView: View {
             .scrollContentBackground(.hidden)
             .background(Color.clear)
             HStack(spacing: 10) {
-                Text("一个功能只能选择一个位置。首页最多显示 6 个模块；设置固定在顶部右侧。")
+                Text("首页最多 6 个模块。恢复默认只改变入口位置与顶部顺序，保留所有业务数据。")
                     .font(.caption2)
                     .foregroundStyle(IslandTheme.text4)
                 Spacer()
                 Button {
                     settings.resetWorkspaceLayout()
                 } label: {
-                    Label("重置功能", systemImage: "arrow.counterclockwise")
+                    Label("恢复位置与顶部顺序", systemImage: "arrow.counterclockwise")
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
@@ -214,6 +280,25 @@ struct DisplaySettingsView: View {
 
     private var memoEditor: some View {
         scrollEditor("备忘录", detail: "关闭细节功能只隐藏入口，原有任务数据会保留") {
+            PermissionSettingsView(kinds: [.notifications])
+            settingsCard {
+                settingsToggle(
+                    "桌面悬浮球",
+                    detail: settings.canEnableMemoFloating
+                        ? "点击展开备忘录小窗口；备忘录设为隐藏时会自动关闭"
+                        : "请先在“功能与顺序”中将备忘录设为“顶部”或“首页”",
+                    value: Binding(get: { settings.memoFloatingEnabled },
+                                   set: { settings.setMemoFloatingEnabled($0) }),
+                    isEnabled: settings.canEnableMemoFloating
+                )
+                if !settings.canEnableMemoFloating {
+                    Button("前往“功能与顺序”") { pane = .features }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 10)
+                }
+            }
             settingsCard {
                 settingsToggle("任务分类", detail: "最多 4 个分类，可调整顺序和占位大小", value: $settings.memoCategoriesEnabled)
                 settingsToggle("启用子任务", detail: "显示子任务列表和添加入口", value: $settings.memoSubtasksEnabled)
@@ -245,7 +330,8 @@ struct DisplaySettingsView: View {
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(IslandTheme.text4)
                         Spacer()
-                        Button("恢复默认") { settings.resetMemoCategories() }
+                        Button("恢复默认分类") { Task { await settings.resetMemoCategories(tasks: tasks) } }
+                            .disabled(settings.isUpdatingCategories)
                             .buttonStyle(.borderless).font(.caption2)
                         Button {
                             settings.addMemoCategory()
@@ -321,6 +407,7 @@ struct DisplaySettingsView: View {
         return HStack(spacing: 2) {
             ForEach(AppSettingsStore.WorkspacePlacement.allCases) { placement in
                 Button {
+                    selectedPreviewFeature = feature
                     settings.setWorkspacePlacement(feature, placement: placement)
                 } label: {
                     Text(placement.compactLabel)
@@ -353,9 +440,10 @@ struct DisplaySettingsView: View {
     private var clipboardEditor: some View {
         scrollEditor("复制记录", detail: "设置记录类型、容量和卡片展示") {
             settingsCard {
-                MemoAISettingsView()
+                MemoAISettingsView(draft: modelDraft)
             }
             settingsCard {
+                settingsToggle("后台采集复制记录", detail: "关闭后停止读取剪贴板，历史保留；隐藏入口不会停采集", value: $settings.clipboardMonitoringEnabled)
                 settingsToggle("记录文字", detail: "监听复制到剪贴板的文字", value: $settings.clipboardCaptureText)
                 settingsToggle("记录图片", detail: "包含截图和复制的图片文件", value: $settings.clipboardCaptureImages)
                 settingsToggle("显示来源应用", detail: "在记录时间后显示来源", value: $settings.clipboardShowSource)
@@ -369,7 +457,7 @@ struct DisplaySettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             editorHeader(
                 "首页布局",
-                detail: "已使用 \(settings.enabledHomeModules.count)/\(AppSettingsStore.maximumHomeModuleCount)；拖动调整顺序"
+                detail: "已使用 \(settings.enabledHomeModules.count)/\(AppSettingsStore.maximumHomeModuleCount)；拖动调整首页排列"
             )
             List {
                 ForEach(settings.orderedVisibleModules(includeCompletions: true)) { module in
@@ -377,7 +465,11 @@ struct DisplaySettingsView: View {
                         Image(systemName: "line.3.horizontal").foregroundStyle(IslandTheme.text4)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(module.rawValue).foregroundStyle(IslandTheme.text1)
-                            Text(module.detail).font(.caption2).foregroundStyle(IslandTheme.text3)
+                            Text("优先尺寸 · \(module.detail)").font(.caption2).foregroundStyle(IslandTheme.text3)
+                            if let span = settings.actualHomeModuleSpan(module) {
+                                Text("实际占位 \(span.columns)/12 列 × \(span.rows)/4 行")
+                                    .font(.caption2).foregroundStyle(IslandTheme.text4)
+                            }
                         }
                         Spacer()
                         Picker("", selection: Binding(
@@ -427,13 +519,13 @@ struct DisplaySettingsView: View {
             .frame(maxWidth: .infinity)
             .background(IslandTheme.surface1, in: RoundedRectangle(cornerRadius: 12))
             HStack {
-                Text("首页最多显示 6 个模块；空间不足时会自动调整尺寸")
+                Text("尺寸为优先选择，最终按可用空间适配；恢复默认只改变首页排列和优先尺寸。")
                     .font(.caption2).foregroundStyle(IslandTheme.text4)
                 Spacer()
                 Button {
                     settings.resetHomeLayout()
                 } label: {
-                    Label("重置首页", systemImage: "arrow.counterclockwise")
+                    Label("恢复首页排列和尺寸", systemImage: "arrow.counterclockwise")
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
@@ -443,7 +535,8 @@ struct DisplaySettingsView: View {
     }
 
     private var focusEditor: some View {
-        scrollEditor("专注计时", detail: "修改后下一次开始计时生效") {
+        scrollEditor("专注计时", detail: "隐藏入口后继续计时；时长在暂停或重置后可改") {
+            PermissionSettingsView(kinds: [.notifications])
             settingsCard {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -483,14 +576,24 @@ struct DisplaySettingsView: View {
     }
 
     private var aiTasksEditor: some View {
-        scrollEditor("AI 任务", detail: "检测本机 AI 应用及任务完成通知接入状态") {
+        scrollEditor("AI 任务", detail: "隐藏入口不会停止接收；后台服务可单独关闭") {
             settingsCard {
-                infoRow("接收服务", value: notifyServer.isRunning ? "运行中" : "端口不可用")
+                settingsToggle("接收本机任务通知", detail: "开启本机回环接入；关闭后接入地址不可用，历史保留", value: $settings.agentNotificationsEnabled)
+                settingsToggle("读取 Codex 状态", detail: "定期读取本机 Codex 任务与额度；关闭后停止轮询和连接", value: $settings.codexMonitoringEnabled)
+            }
+            PermissionSettingsView(kinds: [.notifications])
+            settingsCard {
+                infoRow("接收服务", value: notifyServer.isRunning ? "运行中" : (settings.agentNotificationsEnabled ? "未就绪，请重试或检查端口" : "已关闭"))
                 infoRow("本机地址", value: "127.0.0.1:43821")
+                infoRow("Codex 状态读取", value: settings.codexMonitoringEnabled ? "已开启" : "已关闭 · 显示缓存")
+                if settings.agentNotificationsEnabled && !notifyServer.isRunning {
+                    Button("重试接收服务") { notifyServer.stop(); notifyServer.start() }
+                        .buttonStyle(.borderless).font(.caption).padding(.vertical, 8)
+                }
                 HStack(spacing: 8) {
                     Text("连接验证").foregroundStyle(IslandTheme.text1)
                     Spacer()
-                    Button("发送测试") { notifyServer.sendTestCompletion() }
+                    Button("发送测试") { notifyServer.sendTestCompletion() }.disabled(!notifyServer.isRunning)
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                     Button("复制接入地址") {
@@ -594,7 +697,8 @@ struct DisplaySettingsView: View {
                     .buttonStyle(.borderless)
                     .font(.caption2)
                 }
-                settingsCard {
+                PermissionSettingsView(kinds: [.accessibility, .automation])
+            settingsCard {
                     ForEach(MusicService.Provider.allCases) { provider in
                         musicProviderRow(provider)
                             .settingDivider()
@@ -668,7 +772,8 @@ struct DisplaySettingsView: View {
     }
 
     private var recordingEditor: some View {
-        scrollEditor("录制与转写", detail: "转写关闭后仍会正常保存本地录音") {
+        scrollEditor("录制与转写", detail: "转写关闭后仍保存本地录音；连接配置需要点击保存") {
+            PermissionSettingsView(kinds: [.microphone])
             settingsCard {
                 settingsToggle(
                     "实时转写",
@@ -676,7 +781,7 @@ struct DisplaySettingsView: View {
                     value: Binding(
                         get: { recordings.transcriptionEnabled },
                         set: { enabled in
-                            if enabled && TranscriptionConfig.load().apiKey == nil {
+                            if enabled && !transcriptionHasAPIKey() {
                                 recordings.transcriptionEnabled = false
                                 showsAPIRequired = true
                             } else {
@@ -713,15 +818,24 @@ struct DisplaySettingsView: View {
                     .padding(.vertical, 9)
                     .settingDivider()
                 HStack {
-                    Text(transcriptionSaved ? "已保存" : (TranscriptionConfig.load().apiKey == nil ? "未配置 API Key" : "API Key 已存入钥匙串"))
+                    Text(transcriptionStatus.hasPrefix("保存失败") ? transcriptionStatus : (transcriptionIsDirty ? "有未保存修改" : (transcriptionStatus.isEmpty ? (!transcriptionHasAPIKey() ? "未配置 API Key" : "已保存，连接待录音时验证") : transcriptionStatus)))
                         .font(.caption2)
-                        .foregroundStyle(transcriptionSaved ? IslandTheme.accentGreen : IslandTheme.text3)
+                        .foregroundStyle(IslandTheme.text3)
                     Spacer()
                     Button("保存转写配置", action: saveTranscription)
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                 }
                 .padding(.vertical, 11)
+                Button("还原未保存修改") {
+                    region = savedTranscriptionConfig.region
+                    workspaceId = savedTranscriptionConfig.workspaceId
+                    apiKeyInput = ""
+                    transcriptionStatus = "已还原为上次保存的配置"
+                }.buttonStyle(.borderless).disabled(!transcriptionIsDirty)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                Text("切换设置页保留草稿；退出应用后丢弃未保存的连接修改。")
+                    .font(.caption2).foregroundStyle(IslandTheme.text4).padding(.bottom, 12)
             }
         }
     }
@@ -759,20 +873,14 @@ struct DisplaySettingsView: View {
                 .padding(.vertical, 11)
                 .settingDivider()
                 settingsToggle("开机自动启动", detail: "登录 macOS 后自动运行", value: $settings.autoLaunch)
-                HStack(spacing: 12) {
-                    Text("系统权限")
-                        .foregroundStyle(IslandTheme.text1)
-                    Spacer(minLength: 8)
-                    HStack(spacing: 8) {
-                        permissionButton("麦克风", pane: "Privacy_Microphone")
-                        permissionButton("摄像头", pane: "Privacy_Camera")
-                        permissionButton("屏幕录制", pane: "Privacy_ScreenCapture")
-                    }
-                }
-                .padding(.vertical, 11)
-                .settingDivider()
-                infoRow("设置保存", value: settings.homeLayoutPersisted ? "已写入本机" : "仅本次会话")
+                PermissionSettingsView(kinds: PermissionKind.allCases)
+                infoRow("保存规则", value: "偏好即时保存；连接配置需保存")
                 infoRow("数据位置", value: "Application Support/IslandMemo")
+                Button("打开本地数据目录") {
+                    let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("IslandMemo")
+                    NSWorkspace.shared.open(folder)
+                }.buttonStyle(.borderless).font(.caption)
+                infoRow("应用版本", value: "\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版") · Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未打包")")
             }
         }
     }
@@ -789,6 +897,15 @@ struct DisplaySettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     editorHeader(title, detail: detail)
+                    if let feature = pane.feature {
+                        HStack {
+                            Text("主入口：\(settings.workspacePlacement(for: feature).label)")
+                                .font(.caption).foregroundStyle(IslandTheme.text3)
+                            Spacer()
+                            Button("调整位置") { selectedPreviewFeature = feature; pane = .features }
+                                .buttonStyle(.borderless).font(.caption)
+                        }
+                    }
                     content()
                 }
                 .frame(width: max(0, geometry.size.width - 40), alignment: .leading)
@@ -830,18 +947,19 @@ struct DisplaySettingsView: View {
             .labelsHidden()
             .frame(width: 68)
             Button(role: .destructive) {
-                settings.removeMemoCategory(category)
+                Task { await settings.removeMemoCategory(category, tasks: tasks) }
             } label: {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
-            .disabled(settings.memoCategories.count <= 1)
+            .disabled(settings.memoCategories.count <= 1 || settings.isUpdatingCategories)
+            .help("删除分类后，其中任务会移至第一个保留的分类；已完成与回收站也会迁移")
         }
         .padding(.vertical, 10)
         .contentShape(Rectangle())
     }
 
-    private func settingsToggle(_ title: String, detail: String, value: Binding<Bool>) -> some View {
+    private func settingsToggle(_ title: String, detail: String, value: Binding<Bool>, isEnabled: Bool = true) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).foregroundStyle(IslandTheme.text1)
@@ -852,6 +970,9 @@ struct DisplaySettingsView: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .disabled(!isEnabled)
+                .accessibilityLabel(title)
+                .accessibilityHint(detail)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 11)
@@ -943,25 +1064,29 @@ struct DisplaySettingsView: View {
         )
     }
 
-    private func saveTranscription() {
-        var config = TranscriptionConfig.load()
-        config.region = region
-        config.workspaceId = workspaceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        config.save()
-        let key = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !key.isEmpty {
-            KeychainHelper.save(key: TranscriptionConfig.apiKeychainKey, value: key)
-            apiKeyInput = ""
-        }
-        transcriptionSaved = true
-        showsAPIRequired = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { transcriptionSaved = false }
+    private var transcriptionIsDirty: Bool {
+        region != savedTranscriptionConfig.region || workspaceId != savedTranscriptionConfig.workspaceId || !apiKeyInput.isEmpty
     }
+
+    private func saveTranscription() {
+        let config = TranscriptionConfig(region: region, workspaceId: workspaceId.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard config.saveReplacingKey(apiKeyInput) else {
+            transcriptionStatus = "保存失败：钥匙串未能写入，原配置和输入已保留。"
+            return
+        }
+        savedTranscriptionConfig = config
+        workspaceId = config.workspaceId
+        apiKeyInput = ""
+        transcriptionStatus = "配置已保存，连接尚未验证；录音时可验证转写。"
+        showsAPIRequired = false
+    }
+
 }
 
 private struct SettingsReadOnlyPreview: View {
     @ObservedObject var settings: AppSettingsStore
     let pane: SettingsPane
+    let selectedFeature: AppSettingsStore.Feature
     let pomodoroMinutes: Int
     let notifyServerIsRunning: Bool
 
@@ -969,11 +1094,33 @@ private struct SettingsReadOnlyPreview: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("实时预览").font(.title3.weight(.semibold)).foregroundStyle(IslandTheme.text1)
-                    Text("仅用于查看效果，不能在这里操作").font(.caption2).foregroundStyle(IslandTheme.text3)
+                    Text("设置效果预览").font(.title3.weight(.semibold)).foregroundStyle(IslandTheme.text1)
+                    Text("示例数据 · 不代表当前任务或连接状态").font(.caption2).foregroundStyle(IslandTheme.text3)
                 }
                 Spacer()
                 Label("只读", systemImage: "eye").font(.caption.weight(.medium)).foregroundStyle(IslandTheme.text3)
+            }
+
+            if pane == .features {
+                Label("\(selectedFeature.rawValue) · \(settings.workspacePlacement(for: selectedFeature).label)", systemImage: selectedFeature.systemImage)
+                    .font(.caption).foregroundStyle(IslandTheme.text2)
+            }
+            if pane == .memo {
+                HStack(spacing: 12) {
+                    MemoOrbFace(pendingCount: 2)
+                        .opacity(settings.memoFloatingEnabled ? 1 : 0.35)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(settings.memoFloatingEnabled ? "桌面悬浮球已开启" : "桌面悬浮球未开启")
+                            .font(.caption.weight(.semibold)).foregroundStyle(IslandTheme.text1)
+                        Text(settings.canEnableMemoFloating
+                             ? "外观示例；数字代表未完成任务数量"
+                             : "备忘录设为顶部或首页后即可开启")
+                            .font(.caption2).foregroundStyle(IslandTheme.text3)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(IslandTheme.surface1, in: RoundedRectangle(cornerRadius: 12))
             }
 
             GeometryReader { geometry in
@@ -999,7 +1146,7 @@ private struct SettingsReadOnlyPreview: View {
             previewTopbar
                 .frame(height: IslandTheme.topbarHeight)
             Group {
-                if pane == .display || pane == .home || pane == .focus { homePreview } else { detailPreview }
+                if pane == .display || pane == .home { homePreview } else { detailPreview }
             }
             .frame(height: max(
                 0,
@@ -1067,7 +1214,11 @@ private struct SettingsReadOnlyPreview: View {
     @ViewBuilder private var detailPreview: some View {
         switch pane {
         case .display: EmptyView()
-        case .features, .memo: memoPreview
+        case .features:
+            if settings.workspacePlacement(for: selectedFeature) == .home { homePreview }
+            else { genericPreview(selectedFeature.rawValue, icon: selectedFeature.systemImage,
+                                  subtitle: "主入口：\(settings.workspacePlacement(for: selectedFeature).label) · 点击功能行查看") }
+        case .memo: memoPreview
         case .clipboard: clipboardPreview
         case .focus: focusPreview
         case .aiTasks: genericPreview(
@@ -1079,7 +1230,7 @@ private struct SettingsReadOnlyPreview: View {
         case .recording: genericPreview("快速录音", icon: "record.circle", subtitle: "点击开始 · 可控制实时转写")
         case .links: genericPreview("收藏的链接", icon: "link", subtitle: settings.linksShowURL ? "https://example.com" : "自动整理到分类")
         case .credentials: genericPreview("密钥保存在钥匙串", icon: "key", subtitle: settings.credentialsAllowReveal ? "允许临时显示" : "始终保持隐藏")
-        case .general: genericPreview("丫丫灵动", icon: "gearshape", subtitle: "设置会自动保存在本机")
+        case .general: genericPreview("丫丫灵动", icon: "gearshape", subtitle: "普通偏好即时保存；连接配置需保存")
         case .home: EmptyView()
         }
     }
@@ -1220,12 +1371,7 @@ private struct SettingsReadOnlyPreview: View {
     private var homePreview: some View {
         GeometryReader { geometry in
             let modules = settings.orderedVisibleModules(includeCompletions: true)
-            let sizes = settings.normalizedHomeModuleSizes(for: modules)
-            let spans = modules.map { module -> HomeGridSpan in
-                let size = sizes[module] ?? .small
-                return HomeGridSpan(columns: size.columns, rows: size.rows)
-            }
-            let placements = HomeLayoutEngine.resolve(spans: spans) ?? []
+            let placements = settings.resolvedHomeLayout(for: modules)
             let gap: CGFloat = 6
             let cellWidth = (geometry.size.width - gap * 11) / 12
             let cellHeight = (geometry.size.height - gap * 3) / 4

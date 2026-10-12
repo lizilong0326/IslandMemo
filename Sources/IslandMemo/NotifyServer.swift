@@ -25,6 +25,8 @@ struct TaskCompletion: Identifiable, Codable, Equatable, Sendable {
 final class AgentNotifyServer: ObservableObject {
     @Published private(set) var recentCompletions: [TaskCompletion] = []
     @Published private(set) var isRunning = false
+    @Published private(set) var listeningPort: UInt16?
+    private let port: UInt16
 
     private static let allowedSources: Set<String> = ["codex", "claude", "gpt", "windsurf", "cursor"]
     private static let fallbackTitles: [String: String] = [
@@ -36,9 +38,11 @@ final class AgentNotifyServer: ObservableObject {
     ]
 
     private var listener: NWListener?
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
     private static let historyKey = "agent-completion-history-v1"
 
-    init() {
+    init(port: UInt16 = 43821) {
+        self.port = port
         if let data = UserDefaults.standard.data(forKey: Self.historyKey),
            let saved = try? JSONDecoder().decode([TaskCompletion].self, from: data) {
             recentCompletions = Array(saved.prefix(20))
@@ -47,21 +51,26 @@ final class AgentNotifyServer: ObservableObject {
 
     func start() {
         guard listener == nil else { return }
-        guard let port = NWEndpoint.Port(rawValue: 43821),
-              let listener = try? NWListener(using: .tcp, on: port) else { return }
-        listener.newConnectionHandler = { [weak self] connection in
+        guard let port = NWEndpoint.Port(rawValue: port) else { return }
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        guard let listener = try? NWListener(using: parameters) else { return }
+        listener.newConnectionHandler = { [weak self, weak listener] connection in
             Task { @MainActor in
+                guard let self, let listener, self.listener === listener else { connection.cancel(); return }
                 // 只接受回环地址的连接，等价于参考项目的 127.0.0.1 绑定。
                 guard Self.isLoopback(connection.endpoint) else {
                     connection.cancel()
                     return
                 }
-                self?.handle(connection)
+                self.handle(connection)
             }
         }
-        listener.stateUpdateHandler = { [weak self] state in
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
             Task { @MainActor in
-                self?.isRunning = state == .ready
+                guard let self, let listener, self.listener === listener else { return }
+                self.isRunning = state == .ready
+                self.listeningPort = self.isRunning ? listener.port?.rawValue : nil
             }
         }
         listener.start(queue: .main)
@@ -69,9 +78,12 @@ final class AgentNotifyServer: ObservableObject {
     }
 
     func stop() {
+        connections.values.forEach { $0.cancel() }
+        connections.removeAll()
         listener?.cancel()
         listener = nil
         isRunning = false
+        listeningPort = nil
     }
 
     // MARK: - Minimal HTTP/1.1 handling
@@ -92,6 +104,15 @@ final class AgentNotifyServer: ObservableObject {
     }
 
     private func handle(_ connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        connections[id] = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .cancelled, .failed:
+                Task { @MainActor in self?.connections[id] = nil }
+            default: break
+            }
+        }
         connection.start(queue: .main)
         receive(on: connection, buffer: Data())
     }
@@ -99,7 +120,7 @@ final class AgentNotifyServer: ObservableObject {
     private func receive(on connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, _ in
             Task { @MainActor in
-                guard let self else { connection.cancel(); return }
+                guard let self, self.connections[ObjectIdentifier(connection)] === connection else { connection.cancel(); return }
                 var buffer = buffer
                 if let content { buffer.append(content) }
                 if let headerEnd = buffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) {

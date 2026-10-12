@@ -7,6 +7,10 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT
 APP_DIR="$ROOT_DIR/../../outputs/丫丫灵动-v${VERSION}.app"
 
 cd "$ROOT_DIR"
+if [[ -f "$APP_DIR/Contents/MacOS/IslandMemo" ]] && /usr/sbin/lsof -t "$APP_DIR/Contents/MacOS/IslandMemo" >/dev/null 2>&1; then
+  print -u2 "目标版本正在使用，请关闭应用或更新版本号后再打包。"
+  exit 1
+fi
 mkdir -p "$ROOT_DIR/.cache/clang" "$ROOT_DIR/.cache/swiftpm" "$ROOT_DIR/.cache/config" "$ROOT_DIR/.cache/security"
 
 SDK_PATH="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
@@ -26,6 +30,7 @@ cp ".build/release/IslandMemo" "$APP_DIR/Contents/MacOS/IslandMemo"
 cp "$ROOT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$ROOT_DIR/Resources/PkgInfo" "$APP_DIR/Contents/PkgInfo"
 cp "$ROOT_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+python3 "$ROOT_DIR/scripts/create-build-manifest.py" "$APP_DIR"
 codesign --force --deep --sign - "$APP_DIR"
 
 echo "$APP_DIR"

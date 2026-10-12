@@ -19,10 +19,14 @@ struct QuickCommand: Identifiable, Codable, Equatable, Sendable {
 final class CommandsStore: ObservableObject {
     @Published private(set) var commands: [QuickCommand] = []
 
+    @Published var errorMessage: String?
+
+    private let fileWriter = OrderedFileWriter()
+
     private let fileURL: URL
 
-    init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(dataDirectory: URL? = nil) {
+        let base = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("IslandMemo", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         fileURL = base.appendingPathComponent("commands.json")
@@ -54,15 +58,15 @@ final class CommandsStore: ObservableObject {
         commands = (try? decoder.decode([QuickCommand].self, from: data)) ?? []
     }
 
+    func flushPendingSave(retry: Bool = false) async -> Bool {
+        if retry, fileWriter.lastError != nil { persist() }
+        return await fileWriter.flush()
+    }
+
     private func persist() {
         let snapshot = commands
-        let url = fileURL
-        Task.detached(priority: .utility) {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+        fileWriter.enqueue(snapshot, to: fileURL) { [weak self] error in
+            self?.errorMessage = error.map { "保存常用指令失败：\($0)；修改保留在当前会话，请重试。" }
         }
     }
 }

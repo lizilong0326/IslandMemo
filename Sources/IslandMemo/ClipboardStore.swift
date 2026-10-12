@@ -5,6 +5,8 @@ import Foundation
 @MainActor
 final class ClipboardStore: ObservableObject {
     @Published private(set) var entries: [ClipboardEntry] = []
+    @Published var errorMessage: String?
+    @Published private(set) var isMonitoring = false
 
     private let pasteboard = NSPasteboard.general
     private let metadataURL: URL
@@ -12,6 +14,7 @@ final class ClipboardStore: ObservableObject {
     private let diagnosticsURL: URL
     private var lastChangeCount: Int
     private var monitorTimer: Timer?
+    private var monitorGeneration = 0
 
     init(dataDirectory: URL? = nil) {
         let base = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -26,10 +29,20 @@ final class ClipboardStore: ObservableObject {
     }
 
     func startMonitoring() {
+        guard UserDefaults.standard.object(forKey: "clipboard-monitoring-enabled") as? Bool ?? true else { stopMonitoring(); return }
         guard monitorTimer == nil else { return }
+        lastChangeCount = pasteboard.changeCount
+        isMonitoring = true
         monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollPasteboard() }
         }
+    }
+
+    func stopMonitoring() {
+        monitorGeneration += 1
+        monitorTimer?.invalidate()
+        monitorTimer = nil
+        isMonitoring = false
     }
 
     func copy(_ entry: ClipboardEntry) {
@@ -52,7 +65,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func pollPasteboard() {
-        guard pasteboard.changeCount != lastChangeCount else { return }
+        guard isMonitoring, pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
         let source = NSWorkspace.shared.frontmostApplication?.localizedName
 
@@ -67,6 +80,7 @@ final class ClipboardStore: ObservableObject {
         } else if capturesImages, let imageData = imageDataFromAvailableTypes() {
             recordImage(imageData, source: source)
         } else if capturesImages, let imageURL = imageURLFromMarkup() {
+            let generation = monitorGeneration
             Task { [weak self] in
                 guard let self,
                       let (data, _) = try? await URLSession.shared.data(from: imageURL),
@@ -74,6 +88,7 @@ final class ClipboardStore: ObservableObject {
                     self?.writeUnhandledTypeDiagnostics(source: source)
                     return
                 }
+                guard self.isMonitoring, self.monitorGeneration == generation else { return }
                 self.recordImage(png, source: source)
             }
         } else if capturesText, let text = pasteboard.string(forType: .string), !text.isEmpty {
@@ -257,16 +272,23 @@ final class ClipboardStore: ObservableObject {
     }
 
     func applyPreferences() {
+        startMonitoring()
         trimAndSave()
     }
 
+    func flushPendingSave(retry: Bool = false) async -> Bool {
+        if retry || errorMessage != nil { save() }
+        return errorMessage == nil
+    }
+
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(entries) {
-            try? data.write(to: metadataURL, options: .atomic)
-        }
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(entries).write(to: metadataURL, options: .atomic)
+            errorMessage = nil
+        } catch { errorMessage = "保存复制记录失败：\(error.localizedDescription)；修改保留在当前会话。" }
     }
 
     private func digest(_ data: Data) -> String {

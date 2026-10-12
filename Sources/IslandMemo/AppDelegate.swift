@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let aiApplicationDetector = AIApplicationDetector()
     private let appSettings = AppSettingsStore()
     private let panelMetrics = PanelMetrics()
+    private lazy var memoFloating = MemoFloatingController(store: store, settings: appSettings)
     private lazy var memoCapture = MemoCaptureController(store: store, settings: appSettings) { [weak self] in
         self?.openDisplaySettings()
         DispatchQueue.main.async {
@@ -43,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isPinnedByHotKey = false
     private var hasPointerEnteredAfterHotKey = false
     private var pointerOutsideSince: Date?
+    private var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appSettings.onClipboardConfigurationChanged = { [weak clipboardStore] in
             clipboardStore?.applyPreferences()
         }
+        appSettings.onBackgroundConfigurationChanged = { [weak self] in self?.applyBackgroundPreferences() }
         appSettings.onPanelSizeChanged = { [weak self] in
             self?.updateVisiblePanelSize()
         }
@@ -60,11 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenuBar()
         setupGlobalHotKey()
         setupDismissMonitors()
+        store.onReminderConfigured = { [weak self] in self?.reminderScheduler.requestAuthorizationIfNeeded() }
         store.load()
+        memoFloating.start()
         reminderScheduler.start()
         clipboardStore.startMonitoring()
-        notifyServer.start()
-        codexStatusStore.start()
+        applyBackgroundPreferences()
         aiApplicationDetector.scan()
         startPointerTracking()
     }
@@ -74,10 +78,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    private func applyBackgroundPreferences() {
+        if appSettings.agentNotificationsEnabled { notifyServer.start() } else { notifyServer.stop() }
+        if appSettings.codexMonitoringEnabled { codexStatusStore.start() } else { codexStatusStore.stop() }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateLater }
+        isTerminating = true
+        let visibleWindows = NSApp.windows.filter { $0.isVisible && WindowInteractionPolicy.rootRole(of: $0) != nil }
+        visibleWindows.forEach { $0.orderOut(nil) }
+        memoFloating.stop()
+        memoCapture.cancelInference()
+        linksStore.suspendBackgroundWork()
+        clipboardStore.stopMonitoring()
+        notifyServer.stop()
+        codexStatusStore.stop()
+        reminderScheduler.stop()
+        Task {
+            await recordingsStore.shutdown()
+            await codexStatusStore.shutdown()
+            while appSettings.isUpdatingCategories { try? await Task.sleep(nanoseconds: 50_000_000) }
+            var retry = false
+            while true {
+                let saved = await flushStores(retry: retry)
+                if saved {
+                    sender.reply(toApplicationShouldTerminate: true)
+                    return
+                }
+                let alert = NSAlert()
+                alert.messageText = "仍有修改未保存"
+                alert.informativeText = "应用尚未退出。请检查本地目录是否可写，重试保存或返回应用继续处理。"
+                alert.addButton(withTitle: "重试并退出")
+                alert.addButton(withTitle: "返回应用")
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertFirstButtonReturn { retry = true; continue }
+                isTerminating = false
+                linksStore.resumeBackgroundWork()
+                memoFloating.start()
+                visibleWindows.filter { $0.identifier != WindowInteractionPolicy.orb && $0.identifier != WindowInteractionPolicy.memo }.forEach { $0.orderFront(nil) }
+                clipboardStore.startMonitoring()
+                applyBackgroundPreferences()
+                reminderScheduler.start()
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+        }
+        return .terminateLater
+    }
+
+    private func flushStores(retry: Bool) async -> Bool {
+        var results: [Bool] = []
+        results.append(await (retry ? store.retryPendingSave() : store.awaitPendingSave()))
+        results.append(await commandsStore.flushPendingSave(retry: retry))
+        results.append(await linksStore.flushPendingSave(retry: retry))
+        results.append(await credentialsStore.flushPendingSave(retry: retry))
+        results.append(await recordingsStore.flushPendingSave(retry: retry))
+        results.append(await clipboardStore.flushPendingSave(retry: retry))
+        return results.allSatisfy { $0 }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        clipboardStore.stopMonitoring()
         pointerTrackingTimer?.invalidate()
         reminderScheduler.stop()
         memoCapture.close()
+        memoFloating.stop()
         notifyServer.stop()
         codexStatusStore.stop()
         globalHotKey?.invalidate()
@@ -97,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        panel.identifier = WindowInteractionPolicy.drawer
         let hostingView = NSHostingView(rootView: IslandView(
             store: store,
             clipboardStore: clipboardStore,
@@ -114,7 +181,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onOpenDisplaySettings: { [weak self] in self?.openSettingsFromPanel() },
             onGenerateMemo: { [weak self] text, source in
                 self?.memoCapture.begin(text: text, source: source)
-            }
+            },
+            shouldPresentTaskError: { [weak self] in self?.memoFloating.memoPanel?.isVisible != true }
         ))
         hostingView.wantsLayer = true
         hostingView.autoresizingMask = [.width, .height]
@@ -221,6 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPanel(on screen: NSScreen) {
+        guard !isTerminating else { return }
         pointerOutsideSince = nil
         // 顶边距 = 菜单栏高 + 4，让顶栏避让物理刘海；宽度按屏 clamp。
         let menuBarHeight = max(
@@ -344,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let buttonFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
             if buttonFrame.contains(point) { return true }
         }
-        return NSApp.windows.contains { $0.isVisible && $0.frame.contains(point) }
+        return WindowInteractionPolicy.contains(point, in: panel)
     }
 
     private func handleLocalMouseDown(_ event: NSEvent) {
@@ -354,7 +423,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isPinnedByHotKey,
            panel.isVisible,
            let eventWindow = event.window,
-           eventWindow !== panel {
+           eventWindow !== panel,
+           WindowInteractionPolicy.isRelated(eventWindow, to: panel) {
             hasPointerEnteredAfterHotKey = false
             pointerOutsideSince = nil
             return
@@ -441,6 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDisplaySettings() {
+        guard !isTerminating else { return }
         if let displaySettingsWindow {
             displaySettingsWindow.center()
             displaySettingsWindow.makeKeyAndOrderFront(nil)
@@ -454,9 +525,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.identifier = WindowInteractionPolicy.settings
         window.title = "丫丫灵动 · 设置中心"
         window.contentView = NSHostingView(rootView: DisplaySettingsView(
             settings: appSettings,
+            tasks: store,
             pomodoro: pomodoroStore,
             recordings: recordingsStore,
             notifyServer: notifyServer,

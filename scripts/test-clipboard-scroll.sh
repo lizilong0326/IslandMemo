@@ -19,7 +19,7 @@ PLIST
 swiftc -parse-as-library -swift-version 6 -target "$(uname -m)-apple-macos13.0" \
   Sources/IslandMemo/ClipboardEntry.swift Sources/IslandMemo/ClipboardStore.swift \
   Sources/IslandMemo/ClipboardHistoryView.swift Sources/IslandMemo/AppSettingsStore.swift \
-  Sources/IslandMemo/TaskItem.swift \
+  Sources/IslandMemo/TaskItem.swift Sources/IslandMemo/TaskStore.swift Sources/IslandMemo/TaskRepository.swift \
   Sources/IslandMemo/ShortcutSettings.swift Sources/IslandMemo/HomeLayoutEngine.swift \
   Sources/IslandMemo/MemoCategoryLayoutEngine.swift \
   Tests/Clipboard/ClipboardScrollValidation.swift -o "$APP_DIR/Contents/MacOS/ClipboardScrollValidation"

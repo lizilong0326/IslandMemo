@@ -44,6 +44,16 @@ struct TranscriptionConfig: Equatable, Sendable {
         defaults.set(workspaceId, forKey: Self.workspaceKey)
     }
 
+    /// Commit ordinary fields only after a replacement secret is safely stored.
+    func saveReplacingKey(_ input: String, writeKey: (String) -> Bool = {
+        KeychainHelper.save(key: Self.apiKeychainKey, value: $0)
+    }) -> Bool {
+        let key = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard key.isEmpty || writeKey(key) else { return false }
+        save()
+        return true
+    }
+
     var apiKey: String? {
         let key = KeychainHelper.read(key: Self.apiKeychainKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return key?.isEmpty == false ? key : nil
@@ -123,13 +133,17 @@ actor TranscriptionSession {
         try? await task?.send(.string(Self.jsonString(message)))
     }
 
-    func finish() async {
-        guard !closed else { return }
+    func finish() async -> String {
+        guard !closed else { return finalSegments.joined(separator: " ") }
         let message: [String: Any] = ["event_id": Self.eventID(), "type": "session.finish"]
+        // A deadline also cancels the socket if its final send is waiting on the network.
+        let deadline = Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            self.closeLocally()
+        }
         try? await task?.send(.string(Self.jsonString(message)))
-        // Give the server a moment to flush the last transcript, then close locally.
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
-        closeLocally()
+        await deadline.value
+        return finalSegments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
     }
 
     func cancel() {
@@ -217,7 +231,9 @@ actor TranscriptionSession {
 final class RecordingStore: ObservableObject {
     enum State: Equatable {
         case idle
+        case preparing
         case recording(startedAt: Date)
+        case finalizing
     }
 
     @Published private(set) var recordings: [RecordingEntry] = []
@@ -232,16 +248,24 @@ final class RecordingStore: ObservableObject {
     }
 
     private let recordingsDir: URL
+    @Published var persistenceError: String?
+    private let fileWriter = OrderedFileWriter()
+
     private let metadataURL: URL
     private var engine: AVAudioEngine?
     private var wavWriter: WAVFileWriter?
     private var session: TranscriptionSession?
     private var sessionTask: Task<Void, Never>?
+    private var finalizationTask: Task<Void, Never>?
+    private var operationID: UUID?
+    private let requestAudioAccess: @Sendable (@escaping @Sendable (Bool) -> Void) -> Void
     private var player: AVAudioPlayer?
     private var meterTimer: Timer?
 
-    init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(dataDirectory: URL? = nil,
+         requestAudioAccess: @escaping @Sendable (@escaping @Sendable (Bool) -> Void) -> Void = { AVCaptureDevice.requestAccess(for: .audio, completionHandler: $0) }) {
+        self.requestAudioAccess = requestAudioAccess
+        let base = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("IslandMemo", isDirectory: true)
         recordingsDir = base.appendingPathComponent("Recordings", isDirectory: true)
         metadataURL = base.appendingPathComponent("recordings.json")
@@ -256,8 +280,21 @@ final class RecordingStore: ObservableObject {
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
+    var canToggleRecording: Bool { state == .idle || isRecording }
+    var isRecording: Bool { if case .recording = state { return true }; return false }
+    var controlSymbol: String { isRecording ? "stop.circle.fill" : "record.circle" }
+    var statusText: String {
+        switch state {
+        case .idle: return "点击开始录音"
+        case .preparing: return "正在准备录音…"
+        case .recording: return "录音中 \(elapsedText)"
+        case .finalizing: return "正在保存录音与转写…"
+        }
+    }
+
     /// 供音频 tap 线程回写电平（audioLevel 对外的 setter 保持私有）。
-    func updateAudioLevel(_ level: Float) {
+    func updateAudioLevel(_ level: Float, operationID: UUID) {
+        guard self.operationID == operationID, isRecording else { return }
         audioLevel = level
     }
 
@@ -265,23 +302,33 @@ final class RecordingStore: ObservableObject {
         switch state {
         case .idle: startRecording()
         case .recording: stopRecording()
+        case .preparing, .finalizing: break
         }
     }
 
     func startRecording() {
         guard state == .idle else { return }
-        AVCaptureDevice.requestAccess(for: .audio) { granted in
+        let id = UUID()
+        operationID = id
+        state = .preparing
+        requestAudioAccess { granted in
             Task { @MainActor in
+                guard self.operationID == id, self.state == .preparing else { return }
                 guard granted else {
+                    self.state = .idle
+                    self.operationID = nil
                     self.errorMessage = "没有麦克风权限，请在系统设置 → 隐私与安全性 → 麦克风 中允许"
                     return
                 }
-                self.beginCapture()
+                self.beginCapture(operationID: id)
             }
         }
     }
 
-    private func beginCapture() {
+    private func beginCapture(operationID: UUID) {
+        defer {
+            if state == .preparing { cleanupFailedCapture() }
+        }
         let id = UUID()
         let fileName = "\(id.uuidString).wav"
         let fileURL = recordingsDir.appendingPathComponent(fileName)
@@ -310,12 +357,14 @@ final class RecordingStore: ObservableObject {
                 do {
                     try await session.start(config: TranscriptionConfig.load())
                 } catch {
-                    await MainActor.run { self?.errorMessage = "转写连接失败：\(error.localizedDescription)" }
+                    await MainActor.run {
+                        if self?.operationID == operationID { self?.errorMessage = "转写连接失败：\(error.localizedDescription)；本地录音继续保存。" }
+                    }
                     return
                 }
                 for await event in session.eventStream {
                     await MainActor.run {
-                        guard let self else { return }
+                        guard let self, self.operationID == operationID else { return }
                         switch event {
                         case .connected:
                             break
@@ -332,7 +381,7 @@ final class RecordingStore: ObservableObject {
             }
         }
 
-        let processor = TapProcessor(writer: writer, session: self.session, store: self)
+        let processor = TapProcessor(writer: writer, session: self.session, store: self, operationID: operationID)
         input.installTap(
             onBus: 0,
             bufferSize: 4096,
@@ -375,12 +424,13 @@ final class RecordingStore: ObservableObject {
         let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
         let id = UUID(uuidString: wavWriter?.url.deletingPathExtension().lastPathComponent ?? "") ?? UUID()
         wavWriter?.finalize()
+        if let failure = wavWriter?.failureMessage { errorMessage = "录音文件写入异常：\(failure)；已保留现有文件，请检查本地存储。" }
         let fileName = wavWriter?.url.lastPathComponent ?? ""
         wavWriter = nil
 
         let session = self.session
         self.session = nil
-        state = .idle
+        state = .finalizing
 
         let finalizeEntry: (String) -> Void = { [weak self] transcript in
             guard let self else { return }
@@ -398,18 +448,44 @@ final class RecordingStore: ObservableObject {
             self.persist()
         }
 
-        if let session {
-            sessionTask = Task {
-                await session.finish()
-                var final = ""
-                for await event in session.eventStream {
-                    if case .finished(let text) = event { final = text }
-                }
-                await MainActor.run { finalizeEntry(final) }
-            }
-        } else {
-            finalizeEntry("")
+        let consumer = sessionTask
+        finalizationTask = Task {
+            // Exactly one stream consumer; finish returns the actor's final text directly.
+            let final = await session?.finish() ?? ""
+            _ = await consumer?.value
+            finalizeEntry(final)
+            _ = await self.fileWriter.flush()
+            self.state = .idle
+            self.operationID = nil
+            self.sessionTask = nil
         }
+    }
+
+    private func cleanupFailedCapture() {
+        engine?.stop()
+        engine = nil
+        wavWriter?.finalize()
+        if let url = wavWriter?.url { try? FileManager.default.removeItem(at: url) }
+        wavWriter = nil
+        let failedSession = session
+        session = nil
+        sessionTask?.cancel()
+        sessionTask = nil
+        if let failedSession { Task { await failedSession.cancel() } }
+        stopMeterRefresh()
+        audioLevel = 0
+        state = .idle
+        operationID = nil
+    }
+
+    func shutdown() async {
+        if state == .preparing { operationID = nil; state = .idle }
+        if isRecording { stopRecording() }
+        await finalizationTask?.value
+        player?.stop()
+        player = nil
+        playingID = nil
+        _ = await fileWriter.flush()
     }
 
     // MARK: - Playback & management
@@ -488,15 +564,15 @@ final class RecordingStore: ObservableObject {
         }
     }
 
+    func flushPendingSave(retry: Bool = false) async -> Bool {
+        if retry, fileWriter.lastError != nil { persist() }
+        return await fileWriter.flush()
+    }
+
     private func persist() {
         let snapshot = recordings
-        let url = metadataURL
-        Task.detached(priority: .utility) {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+        fileWriter.enqueue(snapshot, to: metadataURL) { [weak self] error in
+            self?.persistenceError = error.map { "保存录音记录失败：\($0)；修改保留在当前会话，请重试。" }
         }
     }
 }
@@ -507,11 +583,13 @@ private final class TapProcessor: @unchecked Sendable {
     let writer: WAVFileWriter
     let session: TranscriptionSession?
     weak var store: RecordingStore?
+    let operationID: UUID
 
-    init(writer: WAVFileWriter, session: TranscriptionSession?, store: RecordingStore) {
+    init(writer: WAVFileWriter, session: TranscriptionSession?, store: RecordingStore, operationID: UUID) {
         self.writer = writer
         self.session = session
         self.store = store
+        self.operationID = operationID
     }
 
     func process(_ buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
@@ -531,7 +609,7 @@ private final class TapProcessor: @unchecked Sendable {
         let data = Data(bytes: pcm16, count: pcm16.count * 2)
         writer.append(data)
         let level = PCMResampler.rms(mono)
-        Task { @MainActor [weak store] in store?.updateAudioLevel(level) }
+        Task { @MainActor [weak store, operationID] in store?.updateAudioLevel(level, operationID: operationID) }
         if let session {
             Task { await session.send(pcm16LE: data) }
         }
@@ -573,6 +651,8 @@ final class WAVFileWriter: @unchecked Sendable {
     private let handle: FileHandle
     private var dataLength: UInt32 = 0
     private let lock = NSLock()
+    private var finalized = false
+    private(set) var failureMessage: String?
 
     init?(url: URL) {
         self.url = url
@@ -585,18 +665,25 @@ final class WAVFileWriter: @unchecked Sendable {
     func append(_ data: Data) {
         lock.lock()
         defer { lock.unlock() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-        dataLength += UInt32(data.count)
+        guard !finalized else { return }
+        do {
+            _ = try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            dataLength += UInt32(data.count)
+        } catch { failureMessage = error.localizedDescription }
     }
 
     func finalize() {
         lock.lock()
         defer { lock.unlock() }
+        guard !finalized else { return }
+        finalized = true
         let header = WAVFileWriter.buildHeader(dataLength: dataLength)
-        try? handle.seek(toOffset: 0)
-        try? handle.write(contentsOf: header)
-        try? handle.close()
+        do {
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: header)
+            try handle.close()
+        } catch { failureMessage = error.localizedDescription }
     }
 
     private static func buildHeader(dataLength: UInt32) -> Data {

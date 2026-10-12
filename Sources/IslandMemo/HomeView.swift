@@ -298,11 +298,12 @@ struct HomeView: View {
     @ObservedObject var panelMetrics: PanelMetrics
     @ObservedObject var settings: AppSettingsStore
     let onGenerateMemo: (String, String) -> Void
+    @Binding var memoDraft: String
+    var onOpenModule: (AppSettingsStore.HomeModule) -> Void = { _ in }
     var standaloneModule: AppSettingsStore.HomeModule? = nil
 
     @State private var now = Date()
     @State private var newCommand = ""
-    @State private var memoDraft = ""
     @FocusState private var memoDraftFocused: Bool
     @AppStorage("home-quick-note") private var quickNote = ""
     @State private var calendarMonth = Date()
@@ -326,8 +327,8 @@ struct HomeView: View {
         settings.orderedVisibleModules(includeCompletions: showsCompletions)
     }
 
-    private var effectiveModuleSizes: [AppSettingsStore.HomeModule: AppSettingsStore.HomeModuleSize] {
-        settings.normalizedHomeModuleSizes(for: visibleHomeModules)
+    private var effectiveModuleSpans: [AppSettingsStore.HomeModule: HomeGridSpan] {
+        Dictionary(uniqueKeysWithValues: zip(visibleHomeModules, settings.resolvedHomeLayout(for: visibleHomeModules)).map { ($0.0, $0.1.span) })
     }
 
     var body: some View {
@@ -374,8 +375,8 @@ struct HomeView: View {
     }
 
     private func resizableModule(_ module: AppSettingsStore.HomeModule) -> some View {
-        let size = effectiveModuleSizes[module] ?? .small
-        let span = HomeGridSpan(columns: size.columns, rows: size.rows)
+        let size = settings.homeModuleSizes[module] ?? .small
+        let span = effectiveModuleSpans[module] ?? HomeGridSpan(columns: 4, rows: 2)
         let variant = HomeModuleVariant(span: span)
         return moduleContent(module, variant: variant)
             // 模块自身的刷新、翻页等操作通常位于右上角；统一尺寸按钮放在右下角，
@@ -399,7 +400,7 @@ struct HomeView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(6)
-                    .help("组件尺寸：\(size.label)，点击切换")
+                    .help("优先尺寸：\(size.label)；实际 \(span.columns)/12 列 × \(span.rows)/4 行，点击切换")
                     .opacity(hoveredModule == module ? 1 : 0)
                     .allowsHitTesting(hoveredModule == module)
                 }
@@ -568,9 +569,9 @@ struct HomeView: View {
                 cardLabel("录制", systemImage: "waveform")
                 Spacer()
                 Button { recordings.toggleRecording() } label: {
-                    Image(systemName: recordings.state == .idle ? "record.circle" : "stop.circle.fill")
+                    Image(systemName: recordings.controlSymbol)
                         .foregroundStyle(recordings.state == .idle ? IslandTheme.p0 : IslandTheme.text1)
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).disabled(!recordings.canToggleRecording).help(recordings.statusText)
             }
             if items.isEmpty {
                 Text("暂无录音").font(.caption).foregroundStyle(IslandTheme.text4)
@@ -1201,11 +1202,11 @@ struct HomeView: View {
             if standaloneModule == .recorder { Spacer(minLength: 12) }
             Button { recordings.toggleRecording() } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: recordings.state == .idle ? "record.circle" : "stop.circle.fill")
+                    Image(systemName: recordings.controlSymbol)
                         .font(.system(size: standaloneModule == .recorder ? 62 : 26))
                         .foregroundStyle(recordings.state == .idle ? IslandTheme.p0 : IslandTheme.text1)
                     if recordings.state != .idle {
-                        Text(recordings.elapsedText)
+                        Text(recordings.statusText)
                             .font(.callout.monospacedDigit())
                             .foregroundStyle(IslandTheme.text2)
                     } else if variant != .mini {
@@ -1217,7 +1218,7 @@ struct HomeView: View {
                 }
                 .frame(maxWidth: standaloneModule == .recorder ? .infinity : nil)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).disabled(!recordings.canToggleRecording)
             if standaloneModule == .recorder { Spacer(minLength: 12) }
         }
         .tileStyle()
@@ -1403,7 +1404,10 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help("刷新 Codex 额度与任务")
+                .help("刷新 Codex 额度与任务").disabled(!settings.codexMonitoringEnabled)
+            }
+            if !settings.codexMonitoringEnabled {
+                Text("Codex 读取已关闭 · 显示上次记录").font(.caption2).foregroundStyle(IslandTheme.text4)
             }
 
             if variant == .mini {
@@ -1453,7 +1457,7 @@ struct HomeView: View {
                     Text("AI 任务")
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(IslandTheme.text1)
-                    Text("Codex 额度、进行中的任务与完成通知")
+                    Text(settings.codexMonitoringEnabled ? "Codex 额度、进行中的任务与完成通知" : "Codex 读取已关闭 · 当前为上次缓存")
                         .font(.caption2)
                         .foregroundStyle(IslandTheme.text3)
                 }
@@ -1468,7 +1472,7 @@ struct HomeView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(codexStatus.isRefreshing)
+                .disabled(codexStatus.isRefreshing || !settings.codexMonitoringEnabled)
             }
 
             HStack(alignment: .top, spacing: 12) {
@@ -1749,9 +1753,17 @@ struct HomeView: View {
     }
 
     private func cardLabel(_ title: String, systemImage: String) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(IslandTheme.text3)
+        HStack(spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold)).foregroundStyle(IslandTheme.text3)
+            Spacer(minLength: 0)
+            if standaloneModule == nil, let module = AppSettingsStore.HomeModule(rawValue: title) {
+                Button { onOpenModule(module) } label: {
+                    Image(systemName: "arrow.up.forward.square").font(.caption)
+                }.buttonStyle(.borderless).help("查看全部与管理\(title)")
+                    .accessibilityLabel("查看全部与管理\(title)")
+            }
+        }
     }
 
     private func sourceColor(_ source: String) -> Color {

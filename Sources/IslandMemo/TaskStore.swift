@@ -8,6 +8,8 @@ final class TaskStore: ObservableObject {
     @Published private(set) var focusAddRequest = 0
     @Published private(set) var resetMemoListRequest = 0
 
+    var onReminderConfigured: (() -> Void)?
+
     private let repository: any TaskRepository
     private var persistenceTask: Task<Bool, Never>?
 
@@ -47,6 +49,7 @@ final class TaskStore: ObservableObject {
         let task = TaskItem(title: preserveWhitespace ? title : cleaned, dueDate: dueDate, priority: priority, categoryID: categoryID)
         tasks.append(task)
         persist()
+        if let dueDate, dueDate > .now { onReminderConfigured?() }
         return task.id
     }
 
@@ -58,6 +61,7 @@ final class TaskStore: ObservableObject {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty, let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[index].title = preserveWhitespace ? title : cleaned
+        if let dueDate, dueDate > .now, tasks[index].dueDate != dueDate { onReminderConfigured?() }
         tasks[index].dueDate = dueDate
         if let priority { tasks[index].priority = priority }
         persist()
@@ -105,6 +109,7 @@ final class TaskStore: ObservableObject {
 
     func updateDueDate(_ task: TaskItem, dueDate: Date?) {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        if let dueDate, dueDate > .now, tasks[index].dueDate != dueDate { onReminderConfigured?() }
         tasks[index].dueDate = dueDate
         persist()
     }
@@ -146,6 +151,7 @@ final class TaskStore: ObservableObject {
     func updateSubtaskDueDate(in task: TaskItem, subtask: SubtaskItem, dueDate: Date?) {
         guard let taskIndex = tasks.firstIndex(where: { $0.id == task.id }),
               let subtaskIndex = tasks[taskIndex].subtasks?.firstIndex(where: { $0.id == subtask.id }) else { return }
+        if let dueDate, dueDate > .now, tasks[taskIndex].subtasks?[subtaskIndex].dueDate != dueDate { onReminderConfigured?() }
         tasks[taskIndex].subtasks?[subtaskIndex].dueDate = dueDate
         persist()
     }
@@ -155,6 +161,30 @@ final class TaskStore: ObservableObject {
               let subtaskIndex = tasks[taskIndex].subtasks?.firstIndex(where: { $0.id == subtask.id }) else { return }
         tasks[taskIndex].subtasks?[subtaskIndex].priority = priority
         persist()
+    }
+
+    /// Commit definitions only after all task states have durable references.
+    func migrateCategories(validIDs: Set<String>, targetID: String?) async -> Bool {
+        let originals = Dictionary(uniqueKeysWithValues: tasks.compactMap { task -> (UUID, String)? in
+            guard let id = task.categoryID, !validIDs.contains(id) else { return nil }
+            return (task.id, id)
+        })
+        for index in tasks.indices where originals[tasks[index].id] != nil { tasks[index].categoryID = targetID }
+        persist() // Also retries a previous failed migration even when no references changed.
+        guard await awaitPendingSave() else {
+            // Preserve edits to title/state made while saving; restore only our category edits.
+            for index in tasks.indices where tasks[index].categoryID == targetID {
+                if let original = originals[tasks[index].id] { tasks[index].categoryID = original }
+            }
+            persist()
+            _ = await awaitPendingSave()
+            return false
+        }
+        // An editor could have added a task to the old category while the disk write awaited.
+        if tasks.contains(where: { $0.categoryID.map { !validIDs.contains($0) } ?? false }) {
+            return await migrateCategories(validIDs: validIDs, targetID: targetID)
+        }
+        return true
     }
 
     func awaitPendingSave() async -> Bool {

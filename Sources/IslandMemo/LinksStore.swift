@@ -93,10 +93,14 @@ final class LinksStore: ObservableObject {
     @Published private(set) var groups: [LinkGroup] = []
     @Published var errorMessage: String?
 
+    private let fileWriter = OrderedFileWriter()
+    private var metadataTasks: [UUID: Task<Void, Never>] = [:]
+    private var backgroundSuspended = false
+
     private let fileURL: URL
 
-    init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(dataDirectory: URL? = nil) {
+        let base = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("IslandMemo", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         fileURL = base.appendingPathComponent("links.json")
@@ -104,6 +108,7 @@ final class LinksStore: ObservableObject {
     }
 
     func add(rawURL: String) {
+        guard !backgroundSuspended else { return }
         guard let url = LinkSafety.normalizeHttpURL(rawURL) else {
             errorMessage = "链接无效：仅支持公网 http/https 地址"
             return
@@ -114,11 +119,16 @@ final class LinksStore: ObservableObject {
         insert(link, category: LinkClassifier.classify(url: text, title: ""))
         persist()
         if UserDefaults.standard.object(forKey: "links-auto-metadata") as? Bool ?? true {
-            Task { await enrichMetadata(for: link.id) }
+            metadataTasks[link.id] = Task {
+                await enrichMetadata(for: link.id)
+                metadataTasks[link.id] = nil
+            }
         }
     }
 
     func delete(_ link: SavedLink) {
+        metadataTasks[link.id]?.cancel()
+        metadataTasks[link.id] = nil
         for index in groups.indices {
             groups[index].links.removeAll { $0.id == link.id }
         }
@@ -161,7 +171,8 @@ final class LinksStore: ObservableObject {
               data.count <= 2_000_000,
               let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return }
 
-        let title = Self.extractPageTitle(html: html) ?? groups[location.group].links[location.link].title
+        guard !Task.isCancelled, !backgroundSuspended, let currentLocation = locate(linkID) else { return }
+        let title = Self.extractPageTitle(html: html) ?? groups[currentLocation.group].links[currentLocation.link].title
         update(linkID) { $0.title = title }
 
         // Re-classify with the real title, move groups if the category changed.
@@ -173,13 +184,16 @@ final class LinksStore: ObservableObject {
             insert(link, category: category)
         }
 
+        persist() // Save title/reclassification before the optional favicon await.
         if let favicon = Self.extractFaviconHref(html: html, pageURL: pageURL),
            !LinkSafety.isPrivateHost(favicon.host ?? ""),
            let (iconData, iconResponse) = try? await URLSession.shared.data(from: favicon),
            (iconResponse as? HTTPURLResponse).map({ (200..<400).contains($0.statusCode) }) ?? false,
            iconData.count <= 500_000, NSImage(data: iconData) != nil {
+            guard !Task.isCancelled, !backgroundSuspended else { return }
             update(linkID) { $0.faviconData = iconData }
         }
+        guard !Task.isCancelled, !backgroundSuspended else { return }
         persist()
     }
 
@@ -272,15 +286,23 @@ final class LinksStore: ObservableObject {
         groups = (try? decoder.decode([LinkGroup].self, from: data)) ?? []
     }
 
+    func suspendBackgroundWork() {
+        backgroundSuspended = true
+        metadataTasks.values.forEach { $0.cancel() }
+        metadataTasks.removeAll()
+    }
+
+    func resumeBackgroundWork() { backgroundSuspended = false }
+
+    func flushPendingSave(retry: Bool = false) async -> Bool {
+        if retry, fileWriter.lastError != nil { persist() }
+        return await fileWriter.flush()
+    }
+
     private func persist() {
         let snapshot = groups
-        let url = fileURL
-        Task.detached(priority: .utility) {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+        fileWriter.enqueue(snapshot, to: fileURL) { [weak self] error in
+            self?.errorMessage = error.map { "保存链接失败：\($0)；修改保留在当前会话，请重试。" }
         }
     }
 }

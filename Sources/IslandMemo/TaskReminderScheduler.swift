@@ -38,10 +38,24 @@ final class TaskReminderScheduler: NSObject, UNUserNotificationCenterDelegate {
         loadState()
     }
 
+    private var authorizationRequestPending = false
+
+    func requestAuthorizationIfNeeded() {
+        guard !authorizationRequestPending else { return }
+        authorizationRequestPending = true
+        Task {
+            defer { authorizationRequestPending = false }
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            if settings.authorizationStatus == .notDetermined {
+                _ = try? await center.requestAuthorization(options: [.alert, .sound])
+            }
+        }
+    }
+
     func start() {
         let notificationCenter = UNUserNotificationCenter.current()
         notificationCenter.delegate = self
-        notificationCenter.requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
         timer?.invalidate()
         let timer = Timer(timeInterval: 10 * 60, repeats: true) { [weak self] _ in

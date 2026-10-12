@@ -22,10 +22,13 @@ final class CredentialsStore: ObservableObject {
     @Published private(set) var credentials: [Credential] = []
     @Published var errorMessage: String?
 
+    @Published var persistenceError: String?
+    private let fileWriter = OrderedFileWriter()
+
     private let fileURL: URL
 
-    init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(dataDirectory: URL? = nil) {
+        let base = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("IslandMemo", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         fileURL = base.appendingPathComponent("credentials.json")
@@ -93,17 +96,17 @@ final class CredentialsStore: ObservableObject {
             .sorted { $0.createdAt > $1.createdAt }
     }
 
+    func flushPendingSave(retry: Bool = false) async -> Bool {
+        if retry, fileWriter.lastError != nil { persist() }
+        return await fileWriter.flush()
+    }
+
     private func persist() {
         let snapshot = credentials.map {
             Metadata(id: $0.id, service: $0.service, account: $0.account, createdAt: $0.createdAt)
         }
-        let url = fileURL
-        Task.detached(priority: .utility) {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+        fileWriter.enqueue(snapshot, to: fileURL) { [weak self] error in
+            self?.persistenceError = error.map { "保存密钥列表失败：\($0)；修改保留在当前会话，请重试。" }
         }
     }
 }

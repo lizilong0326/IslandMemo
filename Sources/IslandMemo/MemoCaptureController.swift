@@ -54,6 +54,7 @@ final class MemoCaptureController: NSObject, ObservableObject, NSWindowDelegate 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.contentMinSize = NSSize(width: 420, height: 300)
+        window.identifier = WindowInteractionPolicy.capture
         window.title = "生成备忘录 · \(source)"
         window.isReleasedWhenClosed = false
         window.delegate = self
